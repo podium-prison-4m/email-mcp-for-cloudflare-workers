@@ -109,7 +109,10 @@ press F5). Wrangler loads the same `.dev.vars` file automatically in the integra
 
 Production authentication is handled by a Cloudflare Access self-hosted application with
 Managed OAuth. The Worker also verifies every `Cf-Access-Jwt-Assertion` signature, issuer, and
-audience before routing a request.
+audience before routing a request. Assertions issued for Access service tokens (non-identity
+authentication, which carry a `common_name` instead of an `email` claim) are accepted as well,
+so programmatic clients such as MCP Inspector can connect with `CF-Access-Client-Id` and
+`CF-Access-Client-Secret` headers once a service-auth policy allows the token.
 
 1. Deploy the Worker once to obtain its `*.workers.dev` hostname. Until Access is configured,
    the placeholder issuer and audience make the Worker fail closed.

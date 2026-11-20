@@ -1442,9 +1442,22 @@ async function verifyAccessJwt(token: string, env: MailEnv): Promise<AccessIdent
 		issuer: teamDomain,
 		audience: env.POLICY_AUD,
 	});
-	if (typeof payload.email !== "string" || typeof payload.sub !== "string")
-		throw new Error("Cloudflare Access token is missing identity claims");
-	return { email: payload.email, sub: payload.sub };
+	// Interactive sign-ins carry an email claim; Cloudflare Access service
+	// tokens (non-identity authentication) carry a common_name instead, which
+	// may be empty for API-created tokens. jwtVerify above has already
+	// established the assertion's authenticity (signature, issuer, audience,
+	// expiry), and the identity is not consumed beyond this gate, so accept
+	// either form and fall back to a generic service identity.
+	const emailClaim =
+		typeof payload.email === "string" && payload.email ? payload.email : undefined;
+	const commonName =
+		typeof payload.common_name === "string" && payload.common_name
+			? payload.common_name
+			: undefined;
+	const email = emailClaim ?? commonName ?? "access-service-token";
+	const sub =
+		typeof payload.sub === "string" && payload.sub ? payload.sub : email;
+	return { email, sub };
 }
 
 const mcpHandler = MyMCP.serve("/mcp");
