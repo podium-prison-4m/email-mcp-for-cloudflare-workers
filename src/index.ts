@@ -3,7 +3,8 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { McpAgent } from "agents/mcp";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { z } from "zod";
-import { accessRejection } from "./access";
+import { accessRejection, isLocalDevelopment } from "./access";
+import { adminSessionUser } from "./admin-auth";
 import app from "./app";
 import { AccountStore } from "./mail/account-store";
 import { MailService } from "./mail/mail-service";
@@ -163,10 +164,17 @@ export class MyMCP extends McpAgent<MailEnv> {
 	async init() {
 		const env = (this as unknown as { env: MailEnv }).env;
 		const store = new AccountStore(env.EMAIL_KV, env.CREDENTIAL_ENCRYPTION_KEY);
-		const mail = new MailService(store, {
-			clientId: env.OUTLOOK_CLIENT_ID,
-			clientSecret: env.OUTLOOK_CLIENT_SECRET,
-		});
+		const mail = new MailService(
+			store,
+			{
+				clientId: env.OUTLOOK_CLIENT_ID,
+				clientSecret: env.OUTLOOK_CLIENT_SECRET,
+			},
+			{
+				clientId: env.GOOGLE_CLIENT_ID,
+				clientSecret: env.GOOGLE_CLIENT_SECRET,
+			},
+		);
 		const registerTools = (
 			names: string[],
 			config: any,
@@ -1443,14 +1451,60 @@ const mcpHandler = MyMCP.serve("/mcp");
 
 export default {
 	async fetch(request: Request, env: MailEnv, ctx: ExecutionContext): Promise<Response> {
-		const rejection = await accessRejection(request, env, (token) =>
-			verifyAccessJwt(token, env),
-		);
-		if (rejection) return rejection;
-
 		const pathname = new URL(request.url).pathname;
-		return pathname === "/mcp" || pathname.startsWith("/mcp/")
-			? mcpHandler.fetch(request, env, ctx)
-			: app.fetch(request, env, ctx);
+		// The legal pages are public by design: Google OAuth verification and
+		// anyone reviewing the app must reach them without signing in. They are
+		// static documents with no account data, and matching Access bypass
+		// applications let them through the edge without an assertion.
+		if (pathname === "/home" || pathname === "/privacy" || pathname === "/service" || pathname === "/logo.svg" || pathname === "/login")
+			return app.fetch(request, env, ctx);
+
+		// Google Search Console ownership verification (HTML file method). The
+		// file content is defined by Google as "google-site-verification: "
+		// followed by the file name itself, so any well-formed verification
+		// file name can be served on demand. A matching Access bypass
+		// application scoped to the /google path prefix lets it through the
+		// edge; every other path keeps the Access assertion requirement.
+		const verificationFile = pathname.match(/^\/(google[0-9a-f]+\.html)$/);
+		if (verificationFile)
+			return new Response(`google-site-verification: ${verificationFile[1]}`, {
+				headers: { "Content-Type": "text/html; charset=utf-8" },
+			});
+
+		// The MCP endpoint always requires a Cloudflare Access assertion:
+		// AI clients authenticate through Access, never with the management
+		// password.
+		if (pathname === "/mcp" || pathname.startsWith("/mcp/")) {
+			const rejection = await accessRejection(request, env, (token) =>
+				verifyAccessJwt(token, env),
+			);
+			if (rejection) return rejection;
+			return mcpHandler.fetch(request, env, ctx);
+		}
+
+		// The management UI accepts either a Cloudflare Access assertion or
+		// an administrator session cookie issued by the /login page, so the
+		// operator can sign in with a username and password when Access only
+		// guards /mcp.
+		if (!isLocalDevelopment(request, env)) {
+			let allowed = false;
+			const token = request.headers.get("Cf-Access-Jwt-Assertion");
+			if (token) {
+				try {
+					await verifyAccessJwt(token, env);
+					allowed = true;
+				} catch {
+					allowed = false;
+				}
+			}
+			if (!allowed) allowed = (await adminSessionUser(request, env)) !== undefined;
+			if (!allowed) {
+				if (request.method === "GET" || request.method === "HEAD")
+					return Response.redirect(new URL("/login", request.url).toString(), 302);
+				return new Response("Unauthorized: sign in required", { status: 401 });
+			}
+		}
+
+		return app.fetch(request, env, ctx);
 	},
 } satisfies ExportedHandler<MailEnv>;

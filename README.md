@@ -8,7 +8,7 @@
   <a href="https://github.com/Xzese/email-mcp-for-cloudflare-workers/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
 </p>
 
-A container-free remote MCP server for Gmail, Outlook, iCloud, and custom IMAP/SMTP accounts.
+A container-free remote MCP server for Gmail, Outlook, iCloud, Yahoo, AOL, QQ Mail, NetEase Mail, Tencent Exmail, Fastmail, Zoho, and custom IMAP/SMTP accounts.
 
 The Worker connects directly to IMAP and SMTP using Cloudflare outbound TCP sockets. Mailbox credentials are AES-256-GCM encrypted before being stored in Workers KV.
 
@@ -137,6 +137,23 @@ See Cloudflare's [Secure MCP servers](https://developers.cloudflare.com/cloudfla
 and [Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/)
 guides for the current dashboard and redirect-URI configuration.
 
+## Administrator password sign-in (management UI)
+
+The MCP endpoint always requires Cloudflare Access. As an alternative for the web
+management pages only, the Worker can accept an operator-chosen username and password:
+
+1. Set the `ADMIN_PASSWORD` secret on the Worker, and optionally the `ADMIN_USERNAME`
+   variable (default `admin`).
+2. Open `/login`, sign in, and you will be redirected to the management page. The
+   session cookie is encrypted with `CREDENTIAL_ENCRYPTION_KEY`, lasts 24 hours, and
+   can be ended with the **Sign out** button. Five failed attempts from one IP address
+   lock sign-in for 15 minutes.
+
+With this enabled, the Cloudflare Access application can be scoped to the `/mcp` path
+only: the management pages then rely on the password sign-in, while MCP clients keep
+authenticating through Access. A valid Access assertion is still accepted on the
+management pages when one is present.
+
 ## Microsoft Entra app registration for Outlook
 
 Outlook.com, Hotmail, Live, and Microsoft 365 accounts use interactive Microsoft OAuth. The
@@ -215,6 +232,37 @@ application](https://learn.microsoft.com/en-us/entra/identity-platform/quickstar
 and [OAuth for IMAP and
 SMTP](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth).
 
+## Google OAuth client for Gmail
+
+Gmail accounts can use interactive Google OAuth sign-in instead of an app password. The Google
+account that owns the Cloud project does not need to be the mailbox account. Each mailbox owner
+signs in and grants the app access when **Gmail** is selected in the account form.
+
+1. In the [Google Cloud console](https://console.cloud.google.com/), create or select a project.
+2. Open **APIs & Services → OAuth consent screen**, choose **External**, and fill in the app name
+   and contact emails.
+3. Open **APIs & Services → Credentials → Create Credentials → OAuth client ID**, choose **Web
+   application**, and add this authorized redirect URI exactly:
+
+    ```text
+    https://<worker>.<subdomain>.workers.dev/oauth/google/callback
+    ```
+
+4. Copy the client ID (it ends in `.apps.googleusercontent.com`) as `GOOGLE_CLIENT_ID` and install
+   the client secret as the `GOOGLE_CLIENT_SECRET` Worker secret, the same way as
+   `OUTLOOK_CLIENT_SECRET` below.
+
+The Worker requests the `https://mail.google.com/` scope with `openid`, `email`, and `profile`,
+using `access_type=offline` and `prompt=consent` so Google issues a refresh token for IMAP and
+SMTP access.
+
+While the consent screen publishing status is **Testing**, Google expires refresh tokens after
+7 days and the mailbox stops syncing until it is connected again. Publish the app to
+**Production** to keep refresh tokens valid. An unverified app shows a warning during sign-in
+that the signed-in user can accept; Google verification is only required to distribute the app
+publicly. If `GOOGLE_CLIENT_ID` or `GOOGLE_CLIENT_SECRET` is unset, the Gmail form keeps using
+an app password instead.
+
 ## Production secret and deployment
 
 Create and fill `wrangler.production.toml` as described above. The public example intentionally
@@ -270,8 +318,8 @@ Cloudflare only receives files committed to the connected Git repository, so it 
 ignored local `wrangler.production.toml`. Configure the existing Worker as follows:
 
 1. Keep these runtime values under **Settings → Variables and Secrets**:
-    - Plaintext: `OUTLOOK_CLIENT_ID`, `OUTLOOK_TENANT`, `POLICY_AUD`, and `TEAM_DOMAIN`.
-    - Secret: `CREDENTIAL_ENCRYPTION_KEY` and `OUTLOOK_CLIENT_SECRET`.
+    - Plaintext: `OUTLOOK_CLIENT_ID`, `OUTLOOK_TENANT`, `GOOGLE_CLIENT_ID`, `POLICY_AUD`, and `TEAM_DOMAIN`.
+    - Secret: `CREDENTIAL_ENCRYPTION_KEY`, `OUTLOOK_CLIENT_SECRET`, and `GOOGLE_CLIENT_SECRET`.
 2. Under **Settings → Build → Variables and Secrets**, add a build environment variable named
    `EMAIL_KV_NAMESPACE_ID`, set it to the existing `EMAIL_KV` namespace ID, and enable
    **Encrypt**. Runtime variables from step 1 are not available to repository build commands.
@@ -450,9 +498,17 @@ new IMAP UID; omitted fields are preserved, and an empty `attachments` array rem
 
 | Provider | IMAP                            | SMTP                              | Authentication              |
 | -------- | ------------------------------- | --------------------------------- | --------------------------- |
-| Gmail    | `imap.gmail.com:993` TLS        | `smtp.gmail.com:465` TLS          | Google app password         |
+| Gmail    | `imap.gmail.com:993` TLS        | `smtp.gmail.com:465` TLS          | Google OAuth2 sign-in or app password |
 | Outlook  | `outlook.office365.com:993` TLS | `smtp.office365.com:587` STARTTLS | Microsoft OAuth2 sign-in    |
 | iCloud   | `imap.mail.me.com:993` TLS      | `smtp.mail.me.com:587` STARTTLS   | Apple app-specific password |
+| Yahoo    | `imap.mail.yahoo.com:993` TLS   | `smtp.mail.yahoo.com:465` TLS     | Yahoo app password          |
+| AOL      | `imap.aol.com:993` TLS          | `smtp.aol.com:465` TLS            | AOL app password            |
+| QQ Mail  | `imap.qq.com:993` TLS           | `smtp.qq.com:465` TLS             | QQ authorization code       |
+| 163 Mail | `imap.163.com:993` TLS          | `smtp.163.com:465` TLS            | NetEase authorization code  |
+| 126 Mail | `imap.126.com:993` TLS          | `smtp.126.com:465` TLS            | NetEase authorization code  |
+| Tencent Exmail | `imap.exmail.qq.com:993` TLS | `smtp.exmail.qq.com:465` TLS    | Password or authorization code |
+| Fastmail | `imap.fastmail.com:993` TLS     | `smtp.fastmail.com:465` TLS       | Fastmail app password       |
+| Zoho     | `imap.zoho.com:993` TLS         | `smtp.zoho.com:465` TLS           | Zoho app password           |
 | Custom   | Provider supplied               | Provider supplied                 | Password or OAuth2          |
 
 For port 587, set `smtpSecure` to `false`; the native SMTP client negotiates STARTTLS. Cloudflare blocks outbound SMTP port 25.

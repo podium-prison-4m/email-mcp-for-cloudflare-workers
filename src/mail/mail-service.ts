@@ -57,6 +57,7 @@ export class MailService {
 	constructor(
 		private store: AccountStore,
 		private outlookOAuth?: { clientId?: string; clientSecret?: string },
+		private googleOAuth?: { clientId?: string; clientSecret?: string },
 	) {}
 
 	async testConnection(accountId?: string) {
@@ -610,6 +611,31 @@ export class MailService {
 		if (account.auth.type !== "oauth2" || !account.auth.refreshToken || !account.auth.clientId)
 			return account;
 		if (account.auth.expiresAt && account.auth.expiresAt > Date.now() + 60_000) return account;
+		if (account.auth.provider === "google") {
+			const body = new URLSearchParams({
+				client_id: account.auth.clientId,
+				grant_type: "refresh_token",
+				refresh_token: account.auth.refreshToken,
+			});
+			if (this.googleOAuth?.clientSecret && this.googleOAuth.clientId === account.auth.clientId)
+				body.set("client_secret", this.googleOAuth.clientSecret);
+			const response = await fetch("https://oauth2.googleapis.com/token", {
+				method: "POST",
+				headers: { "content-type": "application/x-www-form-urlencoded" },
+				body,
+			});
+			if (!response.ok) throw new Error(`Google token refresh failed (${response.status})`);
+			const token = await response.json<{
+				access_token: string;
+				refresh_token?: string;
+				expires_in: number;
+			}>();
+			account.auth.accessToken = token.access_token;
+			account.auth.refreshToken = token.refresh_token ?? account.auth.refreshToken;
+			account.auth.expiresAt = Date.now() + token.expires_in * 1000;
+			await this.store.update(account);
+			return account;
+		}
 		const endpoint = `https://login.microsoftonline.com/${account.auth.tenant ?? "consumers"}/oauth2/v2.0/token`;
 		const body = new URLSearchParams({
 			client_id: account.auth.clientId,

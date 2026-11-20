@@ -20,6 +20,8 @@ TEAM_DOMAIN = "https://your-team.cloudflareaccess.com"
 POLICY_AUD = "replace-with-your-access-application-aud-tag"
 OUTLOOK_TENANT = "consumers"
 OUTLOOK_CLIENT_ID = "00000000-0000-0000-0000-000000000000"
+GOOGLE_CLIENT_ID = "534814168779-lccn6spin03l0oa2tf3llhajltcjbmmp.apps.googleusercontent.com"
+ADMIN_USERNAME = ""
 
 [observability]
 enabled = true

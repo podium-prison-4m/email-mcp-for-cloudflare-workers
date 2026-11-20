@@ -5,6 +5,11 @@ import {
 	createOutlookOAuthState,
 	type OutlookOAuthState,
 } from "../src/outlook-oauth.ts";
+import {
+	assertValidGoogleOAuthCallback,
+	createGoogleOAuthState,
+	type GoogleOAuthState,
+} from "../src/google-oauth.ts";
 
 function validState(overrides: Partial<OutlookOAuthState> = {}): OutlookOAuthState {
 	const value = Buffer.alloc(32, 7).toString("base64url");
@@ -66,6 +71,71 @@ test("Outlook callback rejects malformed PKCE state", () => {
 	]) {
 		assert.throws(
 			() => assertValidOutlookOAuthCallback(state, state.state),
+			/invalid or expired/,
+		);
+	}
+});
+
+function validGoogleState(overrides: Partial<GoogleOAuthState> = {}): GoogleOAuthState {
+	const value = Buffer.alloc(32, 7).toString("base64url");
+	return {
+		state: value,
+		nonce: value,
+		codeVerifier: value,
+		displayName: "Example mailbox",
+		createdAt: Date.now(),
+		...overrides,
+	};
+}
+
+test("Google authorization creates state, nonce, and an S256 PKCE challenge", async () => {
+	let byte = 1;
+	const { oauthState, codeChallenge } = await createGoogleOAuthState(
+		"Example mailbox",
+		1234,
+		() => new Uint8Array(32).fill(byte++),
+	);
+	const expectedChallenge = Buffer.from(
+		await crypto.subtle.digest("SHA-256", new TextEncoder().encode(oauthState.codeVerifier)),
+	).toString("base64url");
+
+	assert.match(oauthState.state, /^[A-Za-z0-9_-]{43}$/);
+	assert.match(oauthState.nonce, /^[A-Za-z0-9_-]{43}$/);
+	assert.match(oauthState.codeVerifier, /^[A-Za-z0-9_-]{43}$/);
+	assert.notEqual(oauthState.state, oauthState.nonce);
+	assert.notEqual(oauthState.nonce, oauthState.codeVerifier);
+	assert.equal(oauthState.createdAt, 1234);
+	assert.equal(codeChallenge, expectedChallenge);
+});
+
+test("Google callback accepts only its exact, unexpired state", () => {
+	const state = validGoogleState();
+	assert.doesNotThrow(() => assertValidGoogleOAuthCallback(state, state.state));
+	assert.throws(
+		() => assertValidGoogleOAuthCallback(state, Buffer.alloc(32, 8).toString("base64url")),
+		/invalid or expired/,
+	);
+	assert.throws(
+		() =>
+			assertValidGoogleOAuthCallback(
+				validGoogleState({ createdAt: 1_000 }),
+				state.state,
+				1_000 + 10 * 60_000 + 1,
+			),
+		/invalid or expired/,
+	);
+});
+
+test("Google callback rejects malformed PKCE state", () => {
+	for (const state of [
+		validGoogleState({ state: "too-short" }),
+		validGoogleState({ nonce: "too-short" }),
+		validGoogleState({ codeVerifier: "too-short" }),
+		validGoogleState({ displayName: "" }),
+		validGoogleState({ createdAt: Number.NaN }),
+	]) {
+		assert.throws(
+			() => assertValidGoogleOAuthCallback(state, state.state),
 			/invalid or expired/,
 		);
 	}

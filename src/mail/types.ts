@@ -10,6 +10,8 @@ export type AccountAuth =
 	| { type: "password"; password: string }
 	| {
 			type: "oauth2";
+			/** Defaults to "microsoft" for accounts saved before Google sign-in existed. */
+			provider?: "microsoft" | "google";
 			accessToken: string;
 			refreshToken?: string;
 			clientId?: string;

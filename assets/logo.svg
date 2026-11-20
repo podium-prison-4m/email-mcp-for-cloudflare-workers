@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="100%" height="100%">
+  <defs>
+    <radialGradient id="bgGlow" cx="50%" cy="42%" r="60%">
+      <stop offset="0%" stop-color="#0d2b45" />
+      <stop offset="55%" stop-color="#061424" />
+      <stop offset="100%" stop-color="#020810" />
+    </radialGradient>
+    <linearGradient id="cyberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7ef9ff" />
+      <stop offset="45%" stop-color="#38b6ff" />
+      <stop offset="80%" stop-color="#5271ff" />
+      <stop offset="100%" stop-color="#9d4edd" />
+    </linearGradient>
+    <linearGradient id="highlightGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.9" />
+      <stop offset="50%" stop-color="#48cae4" stop-opacity="0.5" />
+      <stop offset="100%" stop-color="#3a0ca3" stop-opacity="0.2" />
+    </linearGradient>
+    <radialGradient id="goldNode" cx="35%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#fff3b0" />
+      <stop offset="50%" stop-color="#f4a261" />
+      <stop offset="100%" stop-color="#e76f51" />
+    </radialGradient>
+    <radialGradient id="cyanNode" cx="35%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#e0fbfc" />
+      <stop offset="50%" stop-color="#48cae4" />
+      <stop offset="100%" stop-color="#0077b6" />
+    </radialGradient>
+    <linearGradient id="textGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="65%" stop-color="#d8f3ff" />
+      <stop offset="100%" stop-color="#8ecae6" />
+    </linearGradient>
+    <filter id="neonGlow" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="8" result="blur1" />
+      <feGaussianBlur stdDeviation="20" result="blur2" />
+      <feMerge>
+        <feMergeNode in="blur2" />
+        <feMergeNode in="blur1" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+    <pattern id="techGrid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1d4e89" stroke-width="0.8" stroke-opacity="0.22" />
+    </pattern>
+  </defs>
+  <rect x="40" y="40" width="920" height="920" rx="56" fill="url(#bgGlow)" />
+  <rect x="40" y="40" width="920" height="920" rx="56" fill="url(#techGrid)" />
+  <g stroke="#38b6ff" stroke-width="1.8" stroke-opacity="0.55" fill="none">
+    <polyline points="260,255 180,380 265,495 365,455 260,255" />
+    <line x1="260" y1="255" x2="360" y2="365" />
+    <line x1="180" y1="380" x2="330" y2="455" />
+    <line x1="265" y1="495" x2="255" y2="590" />
+    <line x1="255" y1="590" x2="345" y2="545" />
+    <line x1="180" y1="455" x2="265" y2="495" />
+    <line x1="180" y1="455" x2="325" y2="455" />
+    <polyline points="605,205 660,205 725,265 815,445 735,540 665,495" />
+    <line x1="660" y1="205" x2="660" y2="265" />
+    <line x1="660" y1="265" x2="725" y2="265" />
+    <line x1="725" y1="265" x2="735" y2="540" />
+    <line x1="665" y1="445" x2="815" y2="445" />
+    <line x1="815" y1="445" x2="665" y2="610" />
+    <line x1="665" y1="610" x2="610" y2="535" />
+    <line x1="735" y1="540" x2="825" y2="545" />
+  </g>
+  <g filter="url(#softGlow)">
+    <circle cx="260" cy="255" r="13" fill="#061424" stroke="#48cae4" stroke-width="2.5" />
+    <circle cx="260" cy="255" r="7" fill="url(#cyanNode)" />
+    <circle cx="338" cy="288" r="9" fill="url(#goldNode)" />
+    <circle cx="180" cy="455" r="12" fill="#061424" stroke="#48cae4" stroke-width="2" />
+    <circle cx="180" cy="455" r="6" fill="url(#cyanNode)" />
+    <circle cx="265" cy="495" r="8" fill="url(#goldNode)" />
+    <circle cx="255" cy="590" r="13" fill="#061424" stroke="#5271ff" stroke-width="2.5" />
+    <circle cx="255" cy="590" r="6" fill="#5271ff" />
+    <circle cx="345" cy="605" r="5" fill="#4cc9f0" />
+    <circle cx="198" cy="532" r="5" fill="#52b788" />
+    <circle cx="640" cy="192" r="5" fill="#52b788" />
+    <circle cx="660" cy="265" r="7" fill="url(#goldNode)" />
+    <circle cx="725" cy="265" r="9" fill="#52b788" />
+    <circle cx="815" cy="445" r="12" fill="#061424" stroke="#48cae4" stroke-width="2" />
+    <circle cx="815" cy="445" r="6" fill="url(#cyanNode)" />
+    <circle cx="735" cy="540" r="10" fill="url(#goldNode)" />
+    <circle cx="738" cy="602" r="6" fill="#52b788" />
+    <circle cx="755" cy="495" r="5" fill="#52b788" />
+    <circle cx="835" cy="545" r="5" fill="#48cae4" />
+  </g>
+  <g fill="#ffffff" opacity="0.85">
+    <path d="M 295 155 L 297 165 L 307 167 L 297 169 L 295 179 L 293 169 L 283 167 L 293 165 Z" />
+    <path d="M 712 180 L 715 193 L 728 196 L 715 199 L 712 212 L 709 199 L 696 196 L 709 193 Z" />
+    <path d="M 245 595 L 247 603 L 255 605 L 247 607 L 245 615 L 243 607 L 235 605 L 243 603 Z" />
+    <path d="M 680 562 L 682 570 L 690 572 L 682 574 L 680 582 L 678 574 L 670 572 L 678 570 Z" />
+    <circle cx="340" cy="205" r="3" fill="#ffd166" />
+    <circle cx="802" cy="322" r="4" fill="#ffd166" />
+    <circle cx="375" cy="638" r="3.5" fill="#ffd166" />
+  </g>
+  <g filter="url(#neonGlow)">
+    <path d="M 390 335 L 390 255 A 110 110 0 0 1 610 255 L 610 335" fill="none" stroke="url(#cyberGrad)" stroke-width="32" stroke-linecap="round" />
+    <path d="M 390 330 L 390 255 A 110 110 0 0 1 610 255 L 610 330" fill="none" stroke="url(#highlightGrad)" stroke-width="10" stroke-linecap="round" />
+    <circle cx="500" cy="455" r="168" fill="#051324" stroke="url(#cyberGrad)" stroke-width="16" />
+    <path d="M 355 370 A 168 168 0 0 1 620 335" fill="none" stroke="#90e0ef" stroke-width="8" stroke-linecap="round" />
+    <path d="M 645 535 A 168 168 0 0 1 380 575" fill="none" stroke="#7b2cbf" stroke-width="8" stroke-linecap="round" />
+    <circle cx="500" cy="455" r="142" fill="#040f1d" stroke="#38b6ff" stroke-width="3" stroke-opacity="0.7" />
+  </g>
+  <g stroke="#64dfdf" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M 490 342 C 462 342, 445 358, 442 375 C 418 378, 405 398, 412 418 C 392 430, 390 458, 406 475 C 395 495, 405 522, 428 528 C 435 552, 462 565, 490 558 Z" stroke-width="3.2" fill="#081c34" fill-opacity="0.7" />
+    <path d="M 510 342 C 538 342, 555 358, 558 375 C 582 378, 595 398, 588 418 C 608 430, 610 458, 594 475 C 605 495, 595 522, 572 528 C 565 552, 538 565, 510 558 Z" stroke-width="3.2" fill="#081c34" fill-opacity="0.7" />
+    <g stroke="#48cae4" stroke-width="1.6" opacity="0.85">
+      <polyline points="442,375 465,395 490,385" />
+      <polyline points="412,418 445,425 465,395" />
+      <polyline points="406,475 442,468 465,495 490,485" />
+      <polyline points="428,528 455,515 465,495" />
+      <line x1="445" y1="425" x2="442" y2="468" />
+      <polyline points="558,375 535,395 510,385" />
+      <polyline points="588,418 555,425 535,395" />
+      <polyline points="594,475 558,468 535,495 510,485" />
+      <polyline points="572,528 545,515 535,495" />
+      <line x1="555" y1="425" x2="558" y2="468" />
+    </g>
+    <g fill="#caf0f8" stroke="none">
+      <circle cx="465" cy="395" r="3.5" />
+      <circle cx="445" cy="425" r="3" />
+      <circle cx="442" cy="468" r="3.5" />
+      <circle cx="465" cy="495" r="3" />
+      <circle cx="455" cy="515" r="2.5" />
+      <circle cx="535" cy="395" r="3.5" />
+      <circle cx="555" cy="425" r="3" />
+      <circle cx="558" cy="468" r="3.5" />
+      <circle cx="535" cy="495" r="3" />
+      <circle cx="545" cy="515" r="2.5" />
+    </g>
+  </g>
+  <g filter="url(#softGlow)">
+    <path d="M 472 442 A 28 28 0 1 1 528 442 C 528 453, 521 462, 513 466 L 521 518 L 479 518 L 487 466 C 479 462, 472 453, 472 442 Z" fill="#020810" stroke="#7ef9ff" stroke-width="3.5" />
+  </g>
+  <g filter="url(#neonGlow)">
+    <line x1="735" y1="295" x2="835" y2="230" stroke="#48cae4" stroke-width="3" stroke-opacity="0.6" stroke-linecap="round" />
+    <line x1="745" y1="312" x2="820" y2="262" stroke="#90e0ef" stroke-width="2" stroke-opacity="0.4" stroke-linecap="round" />
+    <g transform="translate(515, 442) rotate(-34)">
+      <rect x="0" y="-11" width="275" height="22" rx="6" fill="#06182c" stroke="url(#cyberGrad)" stroke-width="4.5" />
+      <line x1="18" y1="0" x2="250" y2="0" stroke="#90e0ef" stroke-width="2" stroke-dasharray="14 6 4 6" />
+      <circle cx="145" cy="0" r="3.5" fill="#ffffff" />
+      <circle cx="185" cy="0" r="3" fill="#7ef9ff" />
+      <path d="M 195 11 L 195 34 L 213 34 L 213 21 L 228 21 L 228 34 L 252 34 L 252 11" fill="#06182c" stroke="#7ef9ff" stroke-width="4" stroke-linejoin="round" />
+    </g>
+  </g>
+  <g text-anchor="middle" font-family="'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif">
+    <text x="500" y="765" font-size="132" font-weight="800" letter-spacing="2" fill="url(#textGrad)" filter="url(#softGlow)">OAuth</text>
+    <text x="500" y="842" font-size="56" font-weight="700" letter-spacing="3" fill="#bce6ff">for AI MCP</text>
+  </g>
+</svg>

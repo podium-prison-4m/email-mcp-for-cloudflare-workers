@@ -18,6 +18,7 @@ test("Cloudflare build config preserves dashboard variables and existing secrets
 	assert.deepEqual(config.secrets.required, [
 		"CREDENTIAL_ENCRYPTION_KEY",
 		"OUTLOOK_CLIENT_SECRET",
+		"GOOGLE_CLIENT_SECRET",
 	]);
 	assert.deepEqual(config.kv_namespaces, [{ binding: "EMAIL_KV", id: namespaceId }]);
 	assert.deepEqual(config.durable_objects.bindings, [

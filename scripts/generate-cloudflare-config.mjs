@@ -17,7 +17,7 @@ export function buildCloudflareConfig(environment = process.env) {
 		compatibility_flags: ["nodejs_compat"],
 		keep_vars: true,
 		secrets: {
-			required: ["CREDENTIAL_ENCRYPTION_KEY", "OUTLOOK_CLIENT_SECRET"],
+			required: ["CREDENTIAL_ENCRYPTION_KEY", "OUTLOOK_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET"],
 		},
 		migrations: [
 			{
