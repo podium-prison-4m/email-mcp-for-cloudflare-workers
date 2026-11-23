@@ -299,6 +299,25 @@ Open `https://<worker>.<subdomain>.workers.dev/` to manage email accounts throug
 Access-protected web interface. Credentials submitted there go directly from the browser to the
 Worker and do not pass through an MCP client or language model.
 
+## Master/slave sharding (optional)
+
+A second deployment can run as a **slave** that stores a subset of the accounts in its own KV
+namespace, typically on a separate Cloudflare account, while clients keep talking only to the
+**master** deployment:
+
+- Slave: set the Worker variable `ROLE` to `slave` and the secret `INTERNAL_API_KEY`. A slave
+  serves only its `/mcp` endpoint and only to requests carrying that key in an `X-Internal-Key`
+  header; it has no sign-in, admin UI, or OAuth routes (every other path returns 404). Give the
+  slave the same `GOOGLE_CLIENT_SECRET` / `OUTLOOK_CLIENT_SECRET` secrets as the master so it can
+  refresh OAuth tokens for its accounts on its own, and its own `CREDENTIAL_ENCRYPTION_KEY`.
+- Master: set the Worker variable `SLAVE_MCP_URL` to the slave's `/mcp` URL and the secret
+  `SLAVE_INTERNAL_KEY` to the slave's internal key. The master then merges `email_list_accounts`
+  and the all-account tools across both deployments, forwards single-account tool calls for
+  slave-held accounts to the slave, and stores new accounts on the slave when
+  `email_add_account` is called with `shard: "slave"`. OAuth sign-in still happens on the master;
+  the resulting tokens can be provisioned to the slave through `email_add_account` with
+  `shard: "slave"` (access/refresh token fields).
+
 ## Connect ChatGPT
 
 After deploying the Worker and configuring Cloudflare Access, add its MCP endpoint to ChatGPT:

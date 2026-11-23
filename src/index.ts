@@ -11,6 +11,15 @@ import { MailService } from "./mail/mail-service";
 import { senderSettings } from "./mail/sender";
 import type { MailEnv } from "./mail/types";
 import { observeTool } from "./observability";
+import {
+	ShardClient,
+	hasSlave,
+	isSlave,
+	mergeStructured,
+	shardConfig,
+	slaveRequestAuthorized,
+	toolResultFromStructured,
+} from "./shard";
 
 const accountSelector = {
 	accountId: z
@@ -182,6 +191,99 @@ export class MyMCP extends McpAgent<MailEnv> {
 		) => {
 			for (const name of names) this.server.registerTool(name, config, handler(name));
 		};
+
+		// Master -> slave sharding (see src/shard.ts): when a slave deployment
+		// is configured, wrap every tool registration so that accounts held by
+		// the slave are served by forwarding the call to the slave's MCP
+		// endpoint, and aggregate tools merge both sides into one answer.
+		const shard = shardConfig(env);
+		if (!isSlave(shard) && hasSlave(shard)) {
+			const client = new ShardClient(shard.slaveUrl!, shard.slaveKey!);
+			let slaveIdsCache: { at: number; ids: Set<string> } | undefined;
+			const slaveIds = async (): Promise<Set<string>> => {
+				if (slaveIdsCache && Date.now() - slaveIdsCache.at < 60_000)
+					return slaveIdsCache.ids;
+				try {
+					const accounts = await client.listAccounts();
+					const ids = new Set(accounts.map((account) => String(account.id)));
+					slaveIdsCache = { at: Date.now(), ids };
+					return ids;
+				} catch {
+					return slaveIdsCache?.ids ?? new Set<string>();
+				}
+			};
+			const AGGREGATES = new Set([
+				"email_search_all_accounts",
+				"email_list_all_inbox_messages",
+				"email_get_all_account_mailbox_statuses",
+			]);
+			const mergeResults = (local: any, remote: any) =>
+				remote?.structuredContent && local?.structuredContent
+					? toolResultFromStructured(
+							mergeStructured(local.structuredContent, remote.structuredContent),
+						)
+					: local;
+			const serverAny = this.server as any;
+			const originalRegisterTool = serverAny.registerTool.bind(serverAny);
+			serverAny.registerTool = (name: string, config: any, handler: any) => {
+				if (name === "email_add_account") {
+					config = {
+						...config,
+						description:
+							config.description +
+							' Set shard to "slave" to store the account on the linked slave server (added through this server, stored and served by the slave); omit or use "local" to store it on this server.',
+						inputSchema: {
+							...config.inputSchema,
+							shard: z
+								.enum(["local", "slave"])
+								.optional()
+								.describe(
+									"Where to store the new account: this server (local, the default) or the linked slave server (slave).",
+								),
+						},
+					};
+				}
+				const wrapped = async (args: any, extra: any) => {
+					if (name === "email_add_account" && args?.shard === "slave") {
+						const { shard: _shard, ...rest } = args;
+						slaveIdsCache = undefined;
+						return client.callTool(name, rest);
+					}
+					if (name === "email_list_accounts") {
+						const local = await handler(args, extra);
+						const remote = await client.callTool(name, {}).catch(() => undefined);
+						return remote ? mergeResults(local, remote) : local;
+					}
+					if (AGGREGATES.has(name)) {
+						const requested: string[] | undefined = args?.accountIds;
+						if (!requested) {
+							const local = await handler(args, extra);
+							const remote = await client.callTool(name, {}).catch(() => undefined);
+							return remote ? mergeResults(local, remote) : local;
+						}
+						const remoteIds = await slaveIds();
+						const slaveOnly = requested.filter((id) => remoteIds.has(id));
+						if (slaveOnly.length === 0) return handler(args, extra);
+						const localOnly = requested.filter((id) => !remoteIds.has(id));
+						if (localOnly.length === 0) return client.callTool(name, args);
+						const [local, remote] = await Promise.all([
+							handler({ ...args, accountIds: localOnly }, extra),
+							client.callTool(name, { ...args, accountIds: slaveOnly }),
+						]);
+						return mergeResults(local, remote);
+					}
+					if (typeof args?.accountId === "string") {
+						const remoteIds = await slaveIds();
+						if (remoteIds.has(args.accountId)) {
+							const localIds = new Set((await store.list()).map((a) => a.id));
+							if (!localIds.has(args.accountId)) return client.callTool(name, args);
+						}
+					}
+					return handler(args, extra);
+				};
+				return originalRegisterTool(name, config, wrapped);
+			};
+		}
 
 		this.server.registerTool(
 			"email_add_account",
@@ -1465,6 +1567,18 @@ const mcpHandler = MyMCP.serve("/mcp");
 export default {
 	async fetch(request: Request, env: MailEnv, ctx: ExecutionContext): Promise<Response> {
 		const pathname = new URL(request.url).pathname;
+		// Slave deployments serve only their MCP endpoint, only to the master
+		// deployment presenting the shared internal key. There is no sign-in,
+		// admin UI, or OAuth route on a slave; every other path is a 404.
+		const shard = shardConfig(env);
+		if (isSlave(shard)) {
+			if (
+				(pathname === "/mcp" || pathname.startsWith("/mcp/")) &&
+				slaveRequestAuthorized(request, shard)
+			)
+				return mcpHandler.fetch(request, env, ctx);
+			return new Response("Not found", { status: 404 });
+		}
 		// The legal pages are public by design: Google OAuth verification and
 		// anyone reviewing the app must reach them without signing in. They are
 		// static documents with no account data, and matching Access bypass
