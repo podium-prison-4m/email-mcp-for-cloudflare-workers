@@ -192,3 +192,33 @@ test("slave export returns full records and rejects unknown IDs", async () => {
 	assert.deepEqual(await exportAccountsFromSlave(config, ["a"], fetchFn as typeof fetch), [{ id: "a" }]);
 	assert.equal(seenUrl, "https://slave.example/internal/export-accounts");
 });
+
+test("shard settings store round-trips encrypted settings and resolve prefers KV over env", async () => {
+	const { ShardSettingsStore, resolveShardConfig } = await import("../src/shard.ts");
+	const { sealJson } = await import("../src/crypto.ts");
+	void sealJson;
+	const key = btoa(String.fromCharCode(...new Uint8Array(32).map((_, i) => i + 1)));
+	const backing = new Map<string, ArrayBuffer>();
+	const kv = {
+		get: async (k: string, _t: string) => backing.get(k) ?? null,
+		put: async (k: string, v: ArrayBuffer) => void backing.set(k, v),
+		delete: async (k: string) => void backing.delete(k),
+	};
+	const store = new ShardSettingsStore(kv as never, key);
+	assert.equal(await store.get(), undefined);
+	await store.set({ slaveUrl: "https://slave.example/mcp", slaveKey: "k2" });
+	assert.deepEqual(await store.get(), { slaveUrl: "https://slave.example/mcp", slaveKey: "k2" });
+	const resolved = await resolveShardConfig(
+		{ SLAVE_MCP_URL: "https://env.example/mcp", SLAVE_INTERNAL_KEY: "env-key" },
+		store,
+	);
+	assert.equal(resolved.slaveUrl, "https://slave.example/mcp");
+	assert.equal(resolved.slaveKey, "k2");
+	await store.clear();
+	assert.equal(await store.get(), undefined);
+	const fallback = await resolveShardConfig(
+		{ SLAVE_MCP_URL: "https://env.example/mcp", SLAVE_INTERNAL_KEY: "env-key" },
+		store,
+	);
+	assert.equal(fallback.slaveUrl, "https://env.example/mcp");
+});

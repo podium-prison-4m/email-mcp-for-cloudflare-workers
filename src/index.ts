@@ -13,11 +13,13 @@ import type { MailAccount, MailEnv } from "./mail/types";
 import { observeTool } from "./observability";
 import {
 	ShardClient,
+	ShardSettingsStore,
 	exportAccountsFromSlave,
 	handleSlaveExport,
 	handleSlaveImport,
 	hasSlave,
 	isSlave,
+	resolveShardConfig,
 	mergeStructured,
 	pushAccountsToSlave,
 	shardConfig,
@@ -200,7 +202,12 @@ export class MyMCP extends McpAgent<MailEnv> {
 		// is configured, wrap every tool registration so that accounts held by
 		// the slave are served by forwarding the call to the slave's MCP
 		// endpoint, and aggregate tools merge both sides into one answer.
-		const shard = shardConfig(env);
+		// The link may be configured in the management page (encrypted KV
+		// settings win over the deployment variables).
+		const shard = await resolveShardConfig(
+			env,
+			new ShardSettingsStore(env.EMAIL_KV, env.CREDENTIAL_ENCRYPTION_KEY),
+		);
 		if (!isSlave(shard) && hasSlave(shard)) {
 			const client = new ShardClient(shard.slaveUrl!, shard.slaveKey!);
 			let slaveIdsCache: { at: number; ids: Set<string> } | undefined;

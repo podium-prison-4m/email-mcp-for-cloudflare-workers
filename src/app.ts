@@ -26,6 +26,16 @@ import {
 	createGoogleOAuthState,
 	type GoogleOAuthState,
 } from "./google-oauth";
+import {
+	ShardClient,
+	ShardSettingsStore,
+	exportAccountsFromSlave,
+	hasSlave,
+	pushAccountsToSlave,
+	resolveShardConfig,
+	shardConfig,
+	type ShardConfig,
+} from "./shard";
 
 const app = new Hono<{ Bindings: MailEnv }>();
 const OUTLOOK_SCOPES =
@@ -45,6 +55,8 @@ interface PendingAccountChange {
 	accountId?: string;
 	account: Omit<MailAccount, "id">;
 	createdAt: number;
+	/** Add mode only: store the new account on the linked slave instead of this server. */
+	target?: "local" | "slave";
 }
 
 app.get("/", async (c) => {
@@ -53,6 +65,7 @@ app.get("/", async (c) => {
 		const editId = c.req.query("edit");
 		const editAccount = editId ? accounts.find((account) => account.id === editId) : undefined;
 		const hasAdminSession = (await adminSessionUser(c.req.raw, c.env)) !== undefined;
+		const view = await shardView(c.env);
 		const connectionFlash = cookieValue(c.req.raw, "connection_test");
 		if (connectionFlash)
 			c.header("Set-Cookie", clearConnectionTestCookie(c.req.url.startsWith("https://")));
@@ -70,6 +83,7 @@ app.get("/", async (c) => {
 				editAccount,
 				undefined,
 				hasAdminSession,
+				view,
 			),
 		);
 	} catch (error) {
@@ -282,9 +296,11 @@ app.post("/accounts", async (c) => {
 	if (!isTrustedFormSubmission(c.req.raw)) return c.text("Forbidden", 403);
 
 	let account: Omit<MailAccount, "id">;
+	let target: "local" | "slave" = "local";
 	try {
 		const form = await c.req.formData();
 		account = accountInput(form);
+		target = form.get("target") === "slave" ? "slave" : "local";
 	} catch (error) {
 		const accounts = await accountStore(c.env)
 			.list()
@@ -303,11 +319,12 @@ app.post("/accounts", async (c) => {
 			mode: "add",
 			account,
 			createdAt: Date.now(),
+			target,
 		});
 	}
 
 	try {
-		await accountStore(c.env).add(account);
+		await persistNewAccount(c.env, account, target);
 		return c.redirect(
 			testResult.smtpConfigured ? "/?status=added_tested" : "/?status=added_tested_imap_only",
 			303,
@@ -520,6 +537,136 @@ app.post("/accounts/:id/remove", async (c) => {
 	}
 });
 
+async function shardRouteError(c: MailContext, error: unknown, status: 400 | 502) {
+	const accounts = await accountStore(c.env)
+		.list()
+		.catch(() => []);
+	const view = await shardView(c.env).catch(() => undefined);
+	return c.html(
+		managementPage(
+			accounts,
+			undefined,
+			errorMessage(error),
+			outlookConfigured(c.env),
+			googleConfigured(c.env),
+			undefined,
+			undefined,
+			false,
+			view,
+		),
+		status,
+	);
+}
+
+app.post("/settings/shard", async (c) => {
+	if (!isTrustedFormSubmission(c.req.raw)) return c.text("Forbidden", 403);
+
+	try {
+		const form = await c.req.formData();
+		const { settingsStore } = await resolvedShard(c.env);
+		if (form.get("action") === "unlink") {
+			await settingsStore.clear();
+			return c.redirect("/?status=slave_unlinked", 303);
+		}
+		const rawUrl = required(form, "slaveUrl").trim();
+		const parsed = new URL(rawUrl);
+		const localHost =
+			parsed.hostname === "localhost" || parsed.hostname.startsWith("127.");
+		if (parsed.protocol !== "https:" && !(localHost && parsed.protocol === "http:"))
+			throw new Error("Slave MCP URL must use https");
+		let slaveUrl = rawUrl.replace(/\/+$/, "");
+		if (!slaveUrl.endsWith("/mcp")) slaveUrl += "/mcp";
+		const keyInput = (form.get("slaveKey")?.toString() ?? "").trim();
+		const existing = await settingsStore.get().catch(() => undefined);
+		const deployment = shardConfig(c.env);
+		const slaveKey =
+			keyInput ||
+			existing?.slaveKey ||
+			(deployment.slaveUrl === slaveUrl ? deployment.slaveKey : undefined);
+		if (!slaveKey)
+			throw new Error("Enter the slave internal key (the INTERNAL_API_KEY secret set on the slave)");
+		// Verify the slave answers with this key before saving anything.
+		await new ShardClient(slaveUrl, slaveKey).listAccounts();
+		await settingsStore.set({ slaveUrl, slaveKey });
+		return c.redirect("/?status=slave_linked", 303);
+	} catch (error) {
+		return shardRouteError(c, error, 400);
+	}
+});
+
+app.post("/accounts/:id/move-to-slave", async (c) => {
+	if (!isTrustedFormSubmission(c.req.raw)) return c.text("Forbidden", 403);
+
+	try {
+		const { config } = await resolvedShard(c.env);
+		if (!hasSlave(config)) throw new Error("No slave server is linked");
+		const store = accountStore(c.env);
+		const account = await store.get(c.req.param("id"));
+		await pushAccountsToSlave(config, [account]);
+		await store.remove(account.id);
+		return c.redirect("/?status=moved_to_slave", 303);
+	} catch (error) {
+		return shardRouteError(c, error, 502);
+	}
+});
+
+app.post("/accounts/:id/move-from-slave", async (c) => {
+	if (!isTrustedFormSubmission(c.req.raw)) return c.text("Forbidden", 403);
+
+	try {
+		const { config } = await resolvedShard(c.env);
+		if (!hasSlave(config)) throw new Error("No slave server is linked");
+		const id = c.req.param("id");
+		const records = (await exportAccountsFromSlave(config, [id])) as MailAccount[];
+		await accountStore(c.env).importAccounts(records);
+		await new ShardClient(config.slaveUrl!, config.slaveKey!).callTool("email_remove_account", {
+			accountId: id,
+		});
+		return c.redirect("/?status=moved_from_slave", 303);
+	} catch (error) {
+		return shardRouteError(c, error, 502);
+	}
+});
+
+app.post("/slave-accounts/:id/test", async (c) => {
+	if (!isTrustedFormSubmission(c.req.raw)) return c.text("Forbidden", 403);
+
+	try {
+		const { config } = await resolvedShard(c.env);
+		if (!hasSlave(config)) throw new Error("No slave server is linked");
+		const result = (await new ShardClient(config.slaveUrl!, config.slaveKey!).callTool(
+			"email_test_connection",
+			{ accountId: c.req.param("id") },
+		)) as { smtpConfigured?: boolean };
+		c.header(
+			"Set-Cookie",
+			connectionTestCookie(c.req.url.startsWith("https://"), Boolean(result?.smtpConfigured)),
+		);
+		return c.redirect("/", 303);
+	} catch (error) {
+		return shardRouteError(
+			c,
+			new Error(`Connection test failed: ${errorMessage(error)}`),
+			502,
+		);
+	}
+});
+
+app.post("/slave-accounts/:id/remove", async (c) => {
+	if (!isTrustedFormSubmission(c.req.raw)) return c.text("Forbidden", 403);
+
+	try {
+		const { config } = await resolvedShard(c.env);
+		if (!hasSlave(config)) throw new Error("No slave server is linked");
+		await new ShardClient(config.slaveUrl!, config.slaveKey!).callTool("email_remove_account", {
+			accountId: c.req.param("id"),
+		});
+		return c.redirect("/?status=removed", 303);
+	} catch (error) {
+		return shardRouteError(c, error, 502);
+	}
+});
+
 app.post("/oauth/outlook/start", async (c) => {
 	if (!isTrustedFormSubmission(c.req.raw)) return c.text("Forbidden", 403);
 
@@ -528,6 +675,9 @@ app.post("/oauth/outlook/start", async (c) => {
 		const form = await c.req.formData();
 		const { oauthState, codeChallenge } = await createOutlookOAuthState(
 			validName(required(form, "name")),
+			undefined,
+			undefined,
+			form.get("target") === "slave" ? "slave" : "local",
 		);
 		const redirectUri = outlookRedirectUri(c.req.raw);
 		const authorize = new URL(
@@ -612,20 +762,24 @@ app.get("/oauth/outlook/callback", async (c) => {
 			oauthState.nonce,
 		);
 
-		await accountStore(c.env).add({
-			name: oauthState.displayName,
-			email: identity.email,
-			imap: { host: "outlook.office365.com", port: 993, secure: true },
-			smtp: { host: "smtp.office365.com", port: 587, secure: false },
-			auth: {
-				type: "oauth2",
-				accessToken: token.access_token,
-				refreshToken: token.refresh_token,
-				clientId: config.clientId,
-				tenant: config.tenant,
-				expiresAt: Date.now() + token.expires_in * 1000,
+		await persistNewAccount(
+			c.env,
+			{
+				name: oauthState.displayName,
+				email: identity.email,
+				imap: { host: "outlook.office365.com", port: 993, secure: true },
+				smtp: { host: "smtp.office365.com", port: 587, secure: false },
+				auth: {
+					type: "oauth2",
+					accessToken: token.access_token,
+					refreshToken: token.refresh_token,
+					clientId: config.clientId,
+					tenant: config.tenant,
+					expiresAt: Date.now() + token.expires_in * 1000,
+				},
 			},
-		});
+			oauthState.target ?? "local",
+		);
 		c.header("Set-Cookie", clearOauthCookie(c.req.url.startsWith("https://")));
 		return c.redirect("/?status=outlook_connected", 303);
 	} catch (error) {
@@ -648,6 +802,9 @@ app.post("/oauth/google/start", async (c) => {
 		const form = await c.req.formData();
 		const { oauthState, codeChallenge } = await createGoogleOAuthState(
 			validName(required(form, "name")),
+			undefined,
+			undefined,
+			form.get("target") === "slave" ? "slave" : "local",
 		);
 		const redirectUri = googleRedirectUri(c.req.raw);
 		const authorize = new URL("https://accounts.google.com/o/oauth2/v2/auth");
@@ -738,20 +895,24 @@ app.get("/oauth/google/callback", async (c) => {
 			oauthState.nonce,
 		);
 
-		await accountStore(c.env).add({
-			name: oauthState.displayName,
-			email: identity.email,
-			imap: { host: "imap.gmail.com", port: 993, secure: true },
-			smtp: { host: "smtp.gmail.com", port: 465, secure: true },
-			auth: {
-				type: "oauth2",
-				provider: "google",
-				accessToken: token.access_token,
-				refreshToken: token.refresh_token,
-				clientId: config.clientId,
-				expiresAt: Date.now() + token.expires_in * 1000,
+		await persistNewAccount(
+			c.env,
+			{
+				name: oauthState.displayName,
+				email: identity.email,
+				imap: { host: "imap.gmail.com", port: 993, secure: true },
+				smtp: { host: "smtp.gmail.com", port: 465, secure: true },
+				auth: {
+					type: "oauth2",
+					provider: "google",
+					accessToken: token.access_token,
+					refreshToken: token.refresh_token,
+					clientId: config.clientId,
+					expiresAt: Date.now() + token.expires_in * 1000,
+				},
 			},
-		});
+			oauthState.target ?? "local",
+		);
 		c.header(
 			"Set-Cookie",
 			clearOauthCookie(c.req.url.startsWith("https://"), "google_oauth", "/oauth/google/callback"),
@@ -803,6 +964,85 @@ function accountStore(env: MailEnv): AccountStore {
 	return new AccountStore(env.EMAIL_KV, env.CREDENTIAL_ENCRYPTION_KEY);
 }
 
+export interface ShardView {
+	configured: boolean;
+	source?: "page" | "deployment";
+	url?: string;
+	online: boolean;
+	slaveAccounts: MailAccount[];
+	error?: string;
+}
+
+async function resolvedShard(
+	env: MailEnv,
+): Promise<{ config: ShardConfig; settingsStore: ShardSettingsStore }> {
+	const settingsStore = new ShardSettingsStore(env.EMAIL_KV, env.CREDENTIAL_ENCRYPTION_KEY);
+	return { config: await resolveShardConfig(env, settingsStore), settingsStore };
+}
+
+// The slave's account summaries carry everything the management page renders
+// (identity, hosts, auth type, sender settings) but no credentials; adapt one
+// into the page's account shape with a placeholder credential that is never
+// displayed or used — slave accounts are managed through the slave, not by
+// editing their record here.
+function displayAccountFromSummary(summary: Record<string, unknown>): MailAccount {
+	const authType = summary.authType === "oauth2" ? "oauth2" : "password";
+	return {
+		id: String(summary.id ?? ""),
+		name: String(summary.name ?? ""),
+		email: String(summary.email ?? ""),
+		imap: summary.imap as MailAccount["imap"],
+		smtp: (summary.smtp as MailAccount["smtp"]) ?? undefined,
+		auth:
+			authType === "oauth2"
+				? { type: "oauth2", accessToken: "" }
+				: { type: "password", password: "" },
+		aliases: Array.isArray(summary.aliases) ? (summary.aliases as string[]) : undefined,
+		defaultFrom: typeof summary.defaultFrom === "string" ? summary.defaultFrom : undefined,
+	};
+}
+
+async function shardView(env: MailEnv): Promise<ShardView> {
+	const settingsStore = new ShardSettingsStore(env.EMAIL_KV, env.CREDENTIAL_ENCRYPTION_KEY);
+	const fromPage = await settingsStore.get().catch(() => undefined);
+	const config = await resolveShardConfig(env, settingsStore);
+	if (!hasSlave(config)) return { configured: false, online: false, slaveAccounts: [] };
+	const view: ShardView = {
+		configured: true,
+		source: fromPage ? "page" : "deployment",
+		url: config.slaveUrl,
+		online: false,
+		slaveAccounts: [],
+	};
+	try {
+		const summaries = await new ShardClient(config.slaveUrl!, config.slaveKey!).listAccounts();
+		view.online = true;
+		view.slaveAccounts = summaries.map(displayAccountFromSummary);
+	} catch (error) {
+		view.error = errorMessage(error);
+	}
+	return view;
+}
+
+async function persistNewAccount(
+	env: MailEnv,
+	account: Omit<MailAccount, "id">,
+	target: "local" | "slave",
+): Promise<void> {
+	if (target === "slave") {
+		const { config } = await resolvedShard(env);
+		if (!hasSlave(config)) throw new Error("No slave server is linked");
+		const record: MailAccount = {
+			...account,
+			...senderSettings(account),
+			id: crypto.randomUUID(),
+		};
+		await pushAccountsToSlave(config, [record]);
+		return;
+	}
+	await accountStore(env).add(account);
+}
+
 async function testNewAccount(
 	env: MailEnv,
 	account: Omit<MailAccount, "id">,
@@ -838,7 +1078,7 @@ async function pendingAccountChange(env: MailEnv, form: FormData): Promise<Pendi
 async function persistAccountChange(env: MailEnv, pending: PendingAccountChange): Promise<void> {
 	const store = accountStore(env);
 	if (pending.mode === "add") {
-		await store.add(pending.account);
+		await persistNewAccount(env, pending.account, pending.target ?? "local");
 		return;
 	}
 	await store.update({ id: pending.accountId!, ...pending.account });
@@ -922,6 +1162,7 @@ function managementPage(
 		change: PendingAccountChange;
 	},
 	hasAdminSession = false,
+	shard?: ShardView,
 ): string {
 	const testSuccess =
 		status === "added_tested"
@@ -975,11 +1216,18 @@ function managementPage(
 							? '<div class="notice success" role="status">Account settings updated.</div>'
 							: status === "removed"
 								? '<div class="notice success" role="status">Account removed.</div>'
-								: error
-									? `<div class="notice error" role="alert">${escapeHtml(error)}</div>`
-									: "";
-	const rows = accounts.length
-		? accounts
+								: status === "moved_to_slave"
+									? '<div class="notice success" role="status">Account moved to the slave server.</div>'
+									: status === "moved_from_slave"
+										? '<div class="notice success" role="status">Account moved back to this server.</div>'
+										: status === "slave_linked"
+											? '<div class="notice success" role="status">Slave server linked.</div>'
+											: status === "slave_unlinked"
+												? '<div class="notice success" role="status">Slave server unlinked. Accounts stored on the slave were left untouched.</div>'
+												: error
+													? `<div class="notice error" role="alert">${escapeHtml(error)}</div>`
+													: "";
+	const localRows = accounts
 				.map(
 					(account) => `<li class="account">
 						<div class="account-header">
@@ -989,6 +1237,7 @@ function managementPage(
 								<form method="post" action="/accounts/${encodeURIComponent(account.id)}/test">
 									<button class="secondary" type="submit">Test connection</button>
 								</form>
+								${shard?.configured ? `<form method="post" action="/accounts/${encodeURIComponent(account.id)}/move-to-slave" onsubmit="return confirm('Move this account to the slave server?')"><button class="secondary" type="submit">Move to slave</button></form>` : ""}
 								<form method="post" action="/accounts/${encodeURIComponent(account.id)}/remove" onsubmit="return confirm('Remove this account?')">
 									<button class="danger" type="submit">Remove</button>
 								</form>
@@ -1009,7 +1258,44 @@ function managementPage(
 						</details>
 					</li>`,
 				)
-				.join("")
+				.join("");
+	const slaveRows = (shard?.slaveAccounts ?? [])
+		.map(
+			(account) => `<li class="account">
+					<div class="account-header">
+						<div class="account-identity"><span class="account-avatar avatar-${providerKey(account)}" aria-hidden="true">${escapeHtml(account.name.charAt(0).toUpperCase())}</span><div><strong>${escapeHtml(account.name)}</strong><span>${escapeHtml(account.email)}</span><span class="badges"><span class="badge">${providerLabel(account)}</span><span class="badge${account.auth.type === "oauth2" ? " badge-oauth" : ""}">${account.auth.type === "oauth2" ? "OAuth 2.0" : "Password"}</span><span class="badge badge-oauth">Slave</span>${account.smtp ? "" : '<span class="badge">Receive only</span>'}</span></div></div>
+						<div class="account-actions">
+								<form method="post" action="/accounts/${encodeURIComponent(account.id)}/move-from-slave">
+									<button class="secondary" type="submit">Move back</button>
+								</form>
+								<form method="post" action="/slave-accounts/${encodeURIComponent(account.id)}/test">
+									<button class="secondary" type="submit">Test connection</button>
+								</form>
+								<form method="post" action="/slave-accounts/${encodeURIComponent(account.id)}/remove" onsubmit="return confirm('Remove this account from the slave server?')">
+									<button class="danger" type="submit">Remove</button>
+								</form>
+						</div>
+					</div>
+					<details class="account-details">
+						<summary>Connection settings</summary>
+						<dl class="account-settings">
+								<div><dt>IMAP</dt><dd>${escapeHtml(account.imap.host)}:${account.imap.port}</dd></div>
+								<div><dt>IMAP security</dt><dd>${account.imap.secure ? "Implicit TLS" : "STARTTLS"}</dd></div>
+								<div><dt>SMTP</dt><dd>${account.smtp ? `${escapeHtml(account.smtp.host)}:${account.smtp.port}` : "Not configured"}</dd></div>
+								${account.smtp ? `<div><dt>SMTP security</dt><dd>${account.smtp.secure ? "Implicit TLS" : "STARTTLS"}</dd></div>` : ""}
+								<div><dt>Can send</dt><dd>${account.smtp ? "Yes" : "No"}</dd></div>
+								<div><dt>Authentication</dt><dd>${account.auth.type === "oauth2" ? "OAuth 2.0" : "Password"}</dd></div>
+								<div><dt>Stored on</dt><dd>Slave server</dd></div>
+								<div><dt>Default From</dt><dd>${escapeHtml(account.defaultFrom ?? account.email)}</dd></div>
+								<div><dt>Aliases</dt><dd>${escapeHtml(account.aliases?.join(", ") || "None configured")}</dd></div>
+						</dl>
+					</details>
+				</li>`,
+		)
+		.join("");
+	const totalAccounts = accounts.length + (shard?.slaveAccounts.length ?? 0);
+	const rows = localRows || slaveRows
+		? localRows + slaveRows
 		: '<li class="empty"><strong>No email accounts yet</strong>Use the Add account button above to connect your first mailbox.</li>';
 	const editor = accountEditor(
 		editAccount,
@@ -1017,6 +1303,7 @@ function managementPage(
 		googleOAuthConfigured,
 		accountTestFailure?.change,
 		accountTestFailure?.pending,
+		shard?.configured ?? false,
 	);
 	const testFailure = accountTestFailure
 		? `<dialog class="account-dialog test-failure-dialog" id="test-failure-dialog" aria-labelledby="test-failure-heading">
@@ -1043,6 +1330,27 @@ function managementPage(
 			<button class="test-result-close" id="test-success-close" type="button">Done</button>
 		</section>
 	</dialog>`
+		: "";
+
+	const slaveSection = shard
+		? `<section class="card" aria-labelledby="slave-heading">
+				<div class="section-heading"><h2 id="slave-heading">Slave server</h2>${shard.configured ? `<span class="count">${shard.online ? shard.slaveAccounts.length : "offline"}</span>` : ""}</div>
+				${
+					shard.configured
+						? `<p>Linked to <strong>${escapeHtml(shard.url ?? "")}</strong> (configured via ${shard.source === "page" ? "this page" : "deployment variables"}). ${shard.online ? `Online — ${shard.slaveAccounts.length} account(s) stored there.` : `Unreachable${shard.error ? `: ${escapeHtml(shard.error)}` : ""}.`}</p>`
+						: `<p>No slave server is linked. Link one to store some accounts on a second deployment of this server; this page and the MCP tools keep working as a single entry point.</p>`
+				}
+				<form method="post" action="/settings/shard">
+					<div class="fields">
+						<label class="full">Slave MCP URL<input name="slaveUrl" type="url" required placeholder="https://email-mcp-slave.example.workers.dev/mcp" value="${escapeHtml(shard.url ?? "")}"></label>
+						<label class="full">Internal key<input name="slaveKey" type="password" autocomplete="off" placeholder="${shard.configured ? "Leave blank to keep the current key" : "The INTERNAL_API_KEY secret set on the slave"}"></label>
+					</div>
+					<div class="form-actions"><button class="submit" type="submit">${shard.configured ? "Save slave settings" : "Link slave server"}</button></div>
+					<p class="help">The key is stored encrypted on this server and never shown again. The connection is verified before anything is saved.</p>
+				</form>
+				${shard.configured && shard.source === "page" ? `<form method="post" action="/settings/shard" onsubmit="return confirm('Unlink the slave server? Accounts stored there stay on the slave but become unreachable from here.')"><input type="hidden" name="action" value="unlink"><button class="danger" type="submit">Unlink slave server</button></form>` : ""}
+				${shard.configured && shard.source === "deployment" ? `<p class="help">This link comes from the SLAVE_MCP_URL / SLAVE_INTERNAL_KEY deployment variables. Saving settings above overrides it from this page.</p>` : ""}
+			</section>`
 		: "";
 
 	return `<!doctype html>
@@ -1201,9 +1509,10 @@ function managementPage(
 				<header class="page-header"><div class="brand"><img class="brand-mark" src="/logo.svg" alt="" aria-hidden="true"><div><h1>Email accounts</h1><p>Manage the mailboxes available to your MCP server.</p></div></div><div class="header-actions">${hasAdminSession ? '<form method="post" action="/logout" class="logout-form"><button class="secondary" type="submit">Sign out</button></form>' : ""}<button class="primary-action" id="add-account-button" type="button">＋ Add account</button></div></header>
 				${notice}
 				<section class="card" aria-labelledby="configured-heading">
-					<div class="section-heading"><h2 id="configured-heading">Configured accounts</h2><span class="count" aria-label="${accounts.length} configured accounts">${accounts.length}</span></div>
+					<div class="section-heading"><h2 id="configured-heading">Configured accounts</h2><span class="count" aria-label="${totalAccounts} configured accounts">${totalAccounts}</span></div>
 						<ul class="accounts">${rows}</ul>
 				</section>
+				${slaveSection}
 				${editor.html}
 				${testFailure}
 				${testSuccessDialog}
@@ -1226,6 +1535,7 @@ function accountEditor(
 	googleOAuthConfigured = false,
 	pendingChange?: PendingAccountChange,
 	pendingToken?: string,
+	shardConfigured = false,
 ): { html: string; script: string } {
 	const editing = Boolean(account || pendingChange);
 	const existingAccount = pendingChange ? pendingChange.mode === "update" : Boolean(account);
@@ -1256,6 +1566,7 @@ function accountEditor(
 				<button class="provider-option" type="button" data-provider="custom" aria-pressed="false"><span class="provider-mark mark-custom" aria-hidden="true">@</span><span class="provider-name">Custom</span><span class="provider-sub">IMAP / SMTP</span></button>
 			</div></fieldset>`
 			}
+			${!editing && shardConfigured ? `<fieldset><legend>Storage</legend><div class="fields"><label class="full">Store this account on<select name="target" id="account-target"><option value="local">This server</option><option value="slave">Slave server</option></select></label></div><p class="help">Accounts stored on the slave are kept in the slave's own storage and served through this server.</p></fieldset>` : ""}
 			<div class="account-detail-fields" id="account-detail-fields"${editing ? "" : " hidden"}>
 			<div class="fields">
 				<label class="full">Display name<input name="name" value="${escapeHtml(formAccount?.name ?? "")}" required maxlength="100" autocomplete="off"></label>

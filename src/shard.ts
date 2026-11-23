@@ -15,6 +15,8 @@
 //                      https://email-mcp-slave.<subdomain>.workers.dev/mcp
 //   SLAVE_INTERNAL_KEY Master only, secret: the key the slave accepts.
 
+import { decrypt, encrypt } from "./crypto.ts";
+
 export interface ShardConfig {
 	role: string;
 	internalKey?: string;
@@ -276,4 +278,70 @@ export async function exportAccountsFromSlave(
 		throw new Error(`Slave export failed (${response.status}): ${(await response.text()).slice(0, 200)}`);
 	const body = (await response.json()) as { accounts?: unknown[] };
 	return body.accounts ?? [];
+}
+
+export interface ShardSettings {
+	slaveUrl: string;
+	slaveKey: string;
+}
+
+const SHARD_SETTINGS_KEY = "mail/shard-settings/v1";
+
+// The slave link can be configured from the master's management page. The
+// settings live in the master's own KV, encrypted with the same key as the
+// account bundle, and take precedence over the SLAVE_MCP_URL /
+// SLAVE_INTERNAL_KEY deployment variables (which remain as a fallback).
+export class ShardSettingsStore {
+	private kv: KVNamespace;
+	private encryptionKey: string;
+
+	constructor(kv: KVNamespace, encryptionKey: string) {
+		this.kv = kv;
+		this.encryptionKey = encryptionKey;
+	}
+
+	async get(): Promise<ShardSettings | undefined> {
+		const encoded = await this.kv.get(SHARD_SETTINGS_KEY, "arrayBuffer");
+		if (!encoded) return undefined;
+		try {
+			const parsed = JSON.parse(
+				new TextDecoder().decode(await decrypt(encoded, this.encryptionKey)),
+			) as Partial<ShardSettings>;
+			if (
+				typeof parsed.slaveUrl === "string" &&
+				parsed.slaveUrl &&
+				typeof parsed.slaveKey === "string" &&
+				parsed.slaveKey
+			)
+				return { slaveUrl: parsed.slaveUrl, slaveKey: parsed.slaveKey };
+		} catch {
+			// Corrupt or foreign data: treat as unconfigured.
+		}
+		return undefined;
+	}
+
+	async set(settings: ShardSettings): Promise<void> {
+		const encoded = await encrypt(
+			new TextEncoder().encode(JSON.stringify(settings)),
+			this.encryptionKey,
+		);
+		await this.kv.put(SHARD_SETTINGS_KEY, encoded);
+	}
+
+	async clear(): Promise<void> {
+		await this.kv.delete(SHARD_SETTINGS_KEY);
+	}
+}
+
+export async function resolveShardConfig(
+	source: unknown,
+	settingsStore?: { get: () => Promise<ShardSettings | undefined> },
+): Promise<ShardConfig> {
+	const base = shardConfig(source);
+	if (settingsStore) {
+		const settings = await settingsStore.get().catch(() => undefined);
+		if (settings)
+			return { role: base.role, slaveUrl: settings.slaveUrl, slaveKey: settings.slaveKey };
+	}
+	return base;
 }

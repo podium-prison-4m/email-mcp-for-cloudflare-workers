@@ -317,6 +317,14 @@ namespace, typically on a separate Cloudflare account, while clients keep talkin
   `email_add_account` is called with `shard: "slave"`. OAuth sign-in still happens on the master;
   the resulting tokens can be provisioned to the slave through `email_add_account` with
   `shard: "slave"` (access/refresh token fields).
+- Management page: the master's admin page can also link or unlink a slave (Slave server
+  section). Page-saved settings are stored encrypted in the master's KV and take precedence
+  over the `SLAVE_MCP_URL` / `SLAVE_INTERNAL_KEY` variables. When a slave is linked, the
+  account list merges both deployments (slave accounts carry a Slave badge), adding an
+  account offers a storage target (this server or the slave — for the manual form and for
+  Google/Microsoft OAuth sign-in), and each account can be moved between the deployments
+  from the list. Slave accounts support connection test and removal from the page; edit
+  them by moving them back first.
 
 ## Connect ChatGPT
 

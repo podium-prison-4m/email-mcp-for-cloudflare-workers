@@ -6,12 +6,15 @@ export interface OutlookOAuthState {
 	codeVerifier: string;
 	displayName: string;
 	createdAt: number;
+	/** Where the connected account should be stored: this server (default) or the linked slave. */
+	target?: "local" | "slave";
 }
 
 export async function createOutlookOAuthState(
 	displayName: string,
 	now = Date.now(),
 	randomBytes = () => crypto.getRandomValues(new Uint8Array(32)),
+	target?: "local" | "slave",
 ): Promise<{ oauthState: OutlookOAuthState; codeChallenge: string }> {
 	const oauthState = {
 		state: bytesToBase64Url(randomBytes()),
@@ -19,6 +22,7 @@ export async function createOutlookOAuthState(
 		codeVerifier: bytesToBase64Url(randomBytes()),
 		displayName,
 		createdAt: now,
+		...(target ? { target } : {}),
 	};
 	const codeChallenge = bytesToBase64Url(
 		new Uint8Array(
