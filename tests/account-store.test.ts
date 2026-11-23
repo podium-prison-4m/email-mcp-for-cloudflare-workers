@@ -93,3 +93,18 @@ test("non-429 KV errors are not retried", async () => {
 	await assert.rejects(store.update(account("a", "a@example.com")), /500/);
 	assert.equal(kv.putAttempts, 1);
 });
+
+test("importAccounts preserves IDs and replaces duplicates", async () => {
+	const kv = new FakeKv(0);
+	const store = new AccountStore(kv as unknown as KVNamespace, key);
+	await store.add({ ...account("ignored", "first@example.com") });
+	const original = (await store.list())[0];
+	await store.importAccounts([
+		account("fixed-id", "imported@example.com"),
+		{ ...original, name: "Replaced Name" },
+	]);
+	const accounts = await store.list();
+	assert.equal(accounts.length, 2);
+	assert.equal(accounts.find((entry) => entry.id === "fixed-id")?.email, "imported@example.com");
+	assert.equal(accounts.find((entry) => entry.id === original.id)?.name, "Replaced Name");
+});

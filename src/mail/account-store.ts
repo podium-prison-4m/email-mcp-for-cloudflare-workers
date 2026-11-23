@@ -82,6 +82,24 @@ export class AccountStore {
 		});
 	}
 
+	// Insert complete account records preserving their IDs (used by a slave
+	// deployment to receive accounts provisioned through the master). Records
+	// whose ID already exists are replaced.
+	async importAccounts(incoming: MailAccount[]): Promise<number> {
+		if (incoming.length === 0) return 0;
+		await this.mutate((accounts) => {
+			const next = [...accounts];
+			for (const account of incoming) {
+				const index = next.findIndex((candidate) => candidate.id === account.id);
+				const record = { ...account, ...senderSettings(account) };
+				if (index >= 0) next[index] = record;
+				else next.push(record);
+			}
+			return next;
+		});
+		return incoming.length;
+	}
+
 	// Read-modify-write with retry: every attempt re-reads the current bundle
 	// and re-applies the mutation, so retries never overwrite an update that
 	// another writer saved in the meantime.

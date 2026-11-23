@@ -175,3 +175,58 @@ export function toolResultFromStructured(structured: Record<string, unknown>): M
 		structuredContent: structured,
 	};
 }
+
+// --- Account provisioning between master and slave -------------------------
+//
+// OAuth sign-in and account creation happen on the master (Plan A). To store
+// the resulting account on a slave, the master pushes the complete account
+// record (credentials included) server-to-server to the slave's internal
+// import endpoint; the slave encrypts it with its own key. Records keep
+// their IDs so watermarks and client references survive the move.
+
+export async function handleSlaveImport(
+	request: Request,
+	store: { importAccounts: (accounts: never[]) => Promise<number> },
+): Promise<Response> {
+	let payload: { accounts?: unknown };
+	try {
+		payload = (await request.json()) as { accounts?: unknown };
+	} catch {
+		return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+	}
+	if (!Array.isArray(payload.accounts) || payload.accounts.length === 0)
+		return Response.json({ error: "accounts must be a non-empty array" }, { status: 400 });
+	for (const account of payload.accounts as Array<Record<string, unknown>>) {
+		if (
+			!account ||
+			typeof account.id !== "string" ||
+			typeof account.email !== "string" ||
+			typeof (account as { imap?: unknown }).imap !== "object" ||
+			typeof (account as { auth?: unknown }).auth !== "object"
+		)
+			return Response.json({ error: "Malformed account record" }, { status: 400 });
+	}
+	const imported = await store.importAccounts(payload.accounts as never[]);
+	return Response.json({ imported });
+}
+
+export async function pushAccountsToSlave(
+	config: ShardConfig,
+	accounts: unknown[],
+	fetchFn: typeof fetch = (input, init) => fetch(input, init),
+): Promise<number> {
+	if (!hasSlave(config)) throw new Error("No slave deployment is configured");
+	const origin = new URL(config.slaveUrl!).origin;
+	const response = await fetchFn(`${origin}/internal/import-accounts`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"X-Internal-Key": config.slaveKey!,
+		},
+		body: JSON.stringify({ accounts }),
+	});
+	if (!response.ok)
+		throw new Error(`Slave import failed (${response.status}): ${(await response.text()).slice(0, 200)}`);
+	const body = (await response.json()) as { imported?: number };
+	return body.imported ?? accounts.length;
+}

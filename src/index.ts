@@ -13,9 +13,11 @@ import type { MailEnv } from "./mail/types";
 import { observeTool } from "./observability";
 import {
 	ShardClient,
+	handleSlaveImport,
 	hasSlave,
 	isSlave,
 	mergeStructured,
+	pushAccountsToSlave,
 	shardConfig,
 	slaveRequestAuthorized,
 	toolResultFromStructured,
@@ -283,6 +285,33 @@ export class MyMCP extends McpAgent<MailEnv> {
 				};
 				return originalRegisterTool(name, config, wrapped);
 			};
+			originalRegisterTool(
+				"email_move_accounts_to_slave",
+				{
+					description:
+						"Move, migrate, or transfer configured accounts from this (master) server to the linked slave server by their account IDs from email_list_accounts. The complete account records, credentials included, are pushed master-to-slave over the internal channel and removed from this server only after the slave confirms storage; account IDs are preserved. Side effect: after a successful move the accounts are served by the slave and this server forwards their tool calls to it. Only available when a slave is linked. Do not use to remove accounts entirely; use email_remove_account for that.",
+					inputSchema: {
+						accountIds: z
+							.array(z.string())
+							.min(1)
+							.describe("Configured account IDs returned by email_list_accounts to move to the slave server."),
+					},
+					outputSchema: { moved: z.array(z.string()) },
+					annotations: titled("Move Accounts To Slave", localWrite),
+				},
+				async ({ accountIds }: { accountIds: string[] }) =>
+					observeTool("email_move_accounts_to_slave", async () => {
+						const moved: string[] = [];
+						for (const id of accountIds) {
+							const account = await store.get(id);
+							await pushAccountsToSlave(shard, [account]);
+							await store.remove(id);
+							moved.push(id);
+						}
+						slaveIdsCache = undefined;
+						return text({ moved });
+					}),
+			);
 		}
 
 		this.server.registerTool(
@@ -1572,6 +1601,14 @@ export default {
 		// admin UI, or OAuth route on a slave; every other path is a 404.
 		const shard = shardConfig(env);
 		if (isSlave(shard)) {
+			if (
+				pathname === "/internal/import-accounts" &&
+				request.method === "POST" &&
+				slaveRequestAuthorized(request, shard)
+			) {
+				const store = new AccountStore(env.EMAIL_KV, env.CREDENTIAL_ENCRYPTION_KEY);
+				return handleSlaveImport(request, store);
+			}
 			if (
 				(pathname === "/mcp" || pathname.startsWith("/mcp/")) &&
 				slaveRequestAuthorized(request, shard)
