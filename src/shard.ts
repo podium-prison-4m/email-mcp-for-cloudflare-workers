@@ -230,3 +230,50 @@ export async function pushAccountsToSlave(
 	const body = (await response.json()) as { imported?: number };
 	return body.imported ?? accounts.length;
 }
+
+// Counterpart of the import endpoint: the slave returns complete account
+// records for the requested IDs so the master can move them back. Served
+// only on slave deployments, only to the internal key holder.
+export async function handleSlaveExport(
+	request: Request,
+	store: { get: (id: string) => Promise<unknown> },
+): Promise<Response> {
+	let payload: { accountIds?: unknown };
+	try {
+		payload = (await request.json()) as { accountIds?: unknown };
+	} catch {
+		return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+	}
+	if (!Array.isArray(payload.accountIds) || payload.accountIds.length === 0)
+		return Response.json({ error: "accountIds must be a non-empty array" }, { status: 400 });
+	const accounts: unknown[] = [];
+	for (const id of payload.accountIds as string[]) {
+		try {
+			accounts.push(await store.get(id));
+		} catch {
+			return Response.json({ error: `Account ${String(id)} not found on slave` }, { status: 404 });
+		}
+	}
+	return Response.json({ accounts });
+}
+
+export async function exportAccountsFromSlave(
+	config: ShardConfig,
+	accountIds: string[],
+	fetchFn: typeof fetch = (input, init) => fetch(input, init),
+): Promise<unknown[]> {
+	if (!hasSlave(config)) throw new Error("No slave deployment is configured");
+	const origin = new URL(config.slaveUrl!).origin;
+	const response = await fetchFn(`${origin}/internal/export-accounts`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"X-Internal-Key": config.slaveKey!,
+		},
+		body: JSON.stringify({ accountIds }),
+	});
+	if (!response.ok)
+		throw new Error(`Slave export failed (${response.status}): ${(await response.text()).slice(0, 200)}`);
+	const body = (await response.json()) as { accounts?: unknown[] };
+	return body.accounts ?? [];
+}

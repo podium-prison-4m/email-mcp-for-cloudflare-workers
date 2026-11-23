@@ -9,10 +9,12 @@ import app from "./app";
 import { AccountStore } from "./mail/account-store";
 import { MailService } from "./mail/mail-service";
 import { senderSettings } from "./mail/sender";
-import type { MailEnv } from "./mail/types";
+import type { MailAccount, MailEnv } from "./mail/types";
 import { observeTool } from "./observability";
 import {
 	ShardClient,
+	exportAccountsFromSlave,
+	handleSlaveExport,
 	handleSlaveImport,
 	hasSlave,
 	isSlave,
@@ -310,6 +312,31 @@ export class MyMCP extends McpAgent<MailEnv> {
 						}
 						slaveIdsCache = undefined;
 						return text({ moved });
+					}),
+			);
+			originalRegisterTool(
+				"email_move_accounts_from_slave",
+				{
+					description:
+						"Move, migrate, or transfer configured accounts back from the linked slave server to this (master) server by their account IDs from email_list_accounts. The complete account records, credentials included, are pulled master-from-slave over the internal channel and removed from the slave only after this server confirms storage; account IDs are preserved. Side effect: after a successful move the accounts are stored and served by this server again. Only available when a slave is linked.",
+					inputSchema: {
+						accountIds: z
+							.array(z.string())
+							.min(1)
+							.describe("Configured account IDs returned by email_list_accounts to move back from the slave server."),
+					},
+					outputSchema: { moved: z.array(z.string()) },
+					annotations: titled("Move Accounts From Slave", localWrite),
+				},
+				async ({ accountIds }: { accountIds: string[] }) =>
+					observeTool("email_move_accounts_from_slave", async () => {
+						const records = (await exportAccountsFromSlave(shard, accountIds)) as MailAccount[];
+						await store.importAccounts(records);
+						for (const id of accountIds) {
+							await client.callTool("email_remove_account", { accountId: id });
+						}
+						slaveIdsCache = undefined;
+						return text({ moved: accountIds });
 					}),
 			);
 		}
@@ -1608,6 +1635,14 @@ export default {
 			) {
 				const store = new AccountStore(env.EMAIL_KV, env.CREDENTIAL_ENCRYPTION_KEY);
 				return handleSlaveImport(request, store);
+			}
+			if (
+				pathname === "/internal/export-accounts" &&
+				request.method === "POST" &&
+				slaveRequestAuthorized(request, shard)
+			) {
+				const store = new AccountStore(env.EMAIL_KV, env.CREDENTIAL_ENCRYPTION_KEY);
+				return handleSlaveExport(request, store);
 			}
 			if (
 				(pathname === "/mcp" || pathname.startsWith("/mcp/")) &&

@@ -153,3 +153,42 @@ test("pushAccountsToSlave posts records to the slave import endpoint", async () 
 	assert.deepEqual(await good.json(), { imported: 1 });
 	assert.equal(stored.length, 1);
 });
+
+test("slave export returns full records and rejects unknown IDs", async () => {
+	const { handleSlaveExport, exportAccountsFromSlave } = await import("../src/shard.ts");
+	const store = {
+		get: async (id: string) => {
+			if (id !== "a") throw new Error("not found");
+			return { id: "a", email: "a@example.com" };
+		},
+	};
+	const ok = await handleSlaveExport(
+		new Request("https://slave.example/internal/export-accounts", {
+			method: "POST",
+			body: JSON.stringify({ accountIds: ["a"] }),
+		}),
+		store,
+	);
+	assert.equal(ok.status, 200);
+	assert.deepEqual(await ok.json(), { accounts: [{ id: "a", email: "a@example.com" }] });
+	const missing = await handleSlaveExport(
+		new Request("https://slave.example/internal/export-accounts", {
+			method: "POST",
+			body: JSON.stringify({ accountIds: ["zzz"] }),
+		}),
+		store,
+	);
+	assert.equal(missing.status, 404);
+
+	let seenUrl = "";
+	const fetchFn = async (url: string, init: any) => {
+		seenUrl = url;
+		return Response.json({ accounts: [{ id: "a" }] });
+	};
+	const config = shardConfig({
+		SLAVE_MCP_URL: "https://slave.example/mcp",
+		SLAVE_INTERNAL_KEY: "k",
+	});
+	assert.deepEqual(await exportAccountsFromSlave(config, ["a"], fetchFn as typeof fetch), [{ id: "a" }]);
+	assert.equal(seenUrl, "https://slave.example/internal/export-accounts");
+});
