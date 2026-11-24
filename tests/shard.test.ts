@@ -305,3 +305,108 @@ test("shard settings store round-trips encrypted settings and resolve prefers KV
 	);
 	assert.equal(fallback.slaveUrl, "https://env.example/mcp");
 });
+
+test("slave OAuth status reports presence and client IDs only, never secret values", async () => {
+	const { slaveOAuthStatusFromEnv, handleSlaveOAuthStatus } = await import("../src/shard.ts");
+	const status = slaveOAuthStatusFromEnv({
+		GOOGLE_CLIENT_ID: "g-client.apps.googleusercontent.com",
+		GOOGLE_CLIENT_SECRET: "g-secret-value",
+		OUTLOOK_CLIENT_ID: "o-client-id",
+		// OUTLOOK_CLIENT_SECRET deliberately absent (e.g. set under a wrong name).
+	});
+	assert.deepEqual(status, {
+		google: { configured: true, clientId: "g-client.apps.googleusercontent.com" },
+		outlook: { configured: false, clientId: "o-client-id" },
+	});
+	const body = await (await handleSlaveOAuthStatus({
+		GOOGLE_CLIENT_ID: "g",
+		GOOGLE_CLIENT_SECRET: "g-secret-value",
+	})).json();
+	assert.equal(JSON.stringify(body).includes("g-secret-value"), false);
+});
+
+test("migration gate pauses the move when the slave lacks the provider secret", async () => {
+	const { pushAccountsToSlave } = await import("../src/shard.ts");
+	const config = shardConfig({
+		SLAVE_MCP_URL: "https://slave.example/mcp",
+		SLAVE_INTERNAL_KEY: "shared-key",
+	});
+	const calls: string[] = [];
+	const fetchFn = async (url: string) => {
+		calls.push(url);
+		if (url.endsWith("/internal/oauth-status"))
+			return Response.json({
+				google: { configured: false, clientId: "g-id" },
+				outlook: { configured: true, clientId: "o-id" },
+			});
+		return Response.json({ imported: 1 });
+	};
+	const googleAccount = {
+		id: "g1",
+		email: "person@gmail.com",
+		imap: {},
+		auth: { type: "oauth2", provider: "google", clientId: "g-id", refreshToken: "r" },
+	};
+	await assert.rejects(
+		pushAccountsToSlave(config, [googleAccount], fetchFn as typeof fetch),
+		/paused: the slave is missing GOOGLE_CLIENT_SECRET/,
+	);
+	// The import endpoint must never be reached when the gate refuses.
+	assert.deepEqual(calls, ["https://slave.example/internal/oauth-status"]);
+
+	// Same account, slave now configured with a matching client ID: move proceeds.
+	const okFetch = async (url: string) => {
+		if (url.endsWith("/internal/oauth-status"))
+			return Response.json({
+				google: { configured: true, clientId: "g-id" },
+				outlook: { configured: false },
+			});
+		return Response.json({ imported: 1 });
+	};
+	assert.equal(await pushAccountsToSlave(config, [googleAccount], okFetch as typeof fetch), 1);
+
+	// Client ID mismatch is also a hard stop.
+	const mismatchFetch = async (url: string) => {
+		if (url.endsWith("/internal/oauth-status"))
+			return Response.json({
+				google: { configured: true, clientId: "other-id" },
+				outlook: { configured: false },
+			});
+		return Response.json({ imported: 1 });
+	};
+	await assert.rejects(
+		pushAccountsToSlave(config, [googleAccount], mismatchFetch as typeof fetch),
+		/client ID for google does not match/,
+	);
+
+	// Password accounts need no provider secret and skip the status check.
+	let statusCalls = 0;
+	const passwordFetch = async (url: string) => {
+		if (url.endsWith("/internal/oauth-status")) statusCalls++;
+		return Response.json({ imported: 1 });
+	};
+	const passwordAccount = {
+		id: "p1",
+		email: "person@yahoo.com",
+		imap: {},
+		auth: { type: "password", password: "x" },
+	};
+	assert.equal(await pushAccountsToSlave(config, [passwordAccount], passwordFetch as typeof fetch), 1);
+	assert.equal(statusCalls, 0);
+
+	// Edit push-backs opt out of the gate entirely.
+	assert.equal(
+		await pushAccountsToSlave(config, [googleAccount], passwordFetch as typeof fetch, {
+			skipOAuthGate: true,
+		}),
+		1,
+	);
+	assert.equal(statusCalls, 0);
+
+	// A slave too old to answer the status endpoint also pauses the move.
+	const legacyFetch = async () => new Response("Not found", { status: 404 });
+	await assert.rejects(
+		pushAccountsToSlave(config, [googleAccount], legacyFetch as typeof fetch),
+		/could not be verified/,
+	);
+});

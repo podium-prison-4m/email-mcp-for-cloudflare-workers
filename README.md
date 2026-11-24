@@ -310,6 +310,13 @@ namespace, typically on a separate Cloudflare account, while clients keep talkin
   header; it has no sign-in, admin UI, or OAuth routes (every other path returns 404). Give the
   slave the same `GOOGLE_CLIENT_SECRET` / `OUTLOOK_CLIENT_SECRET` secrets as the master so it can
   refresh OAuth tokens for its accounts on its own, and its own `CREDENTIAL_ENCRYPTION_KEY`.
+  Migrations are gated on this: before moving an account to the slave (or storing a new
+  account there), the master asks the slave's internal `/internal/oauth-status` endpoint
+  which providers it is configured for — presence booleans and public client IDs only, never
+  secret values — and refuses the move, moving nothing, when a required secret is missing
+  (including when it was saved under a misspelled name) or the client ID does not match the
+  account's tokens. Password accounts need no provider secret and are never gated; edits
+  pushed back to accounts the slave already holds are not migrations and are not gated.
 - Master: set the Worker variable `SLAVE_MCP_URL` to the slave's `/mcp` URL and the secret
   `SLAVE_INTERNAL_KEY` to the slave's internal key. The master then merges `email_list_accounts`
   and the all-account tools across both deployments, forwards single-account tool calls for

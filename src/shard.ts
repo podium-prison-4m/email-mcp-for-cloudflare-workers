@@ -212,12 +212,133 @@ export async function handleSlaveImport(
 	return Response.json({ imported });
 }
 
+// --- Slave OAuth readiness gate --------------------------------------------
+//
+// An OAuth account moved to a slave can only refresh its tokens if the slave
+// itself carries the matching provider client secret (GOOGLE_CLIENT_SECRET /
+// OUTLOOK_CLIENT_SECRET, under exactly those names). Moving one anyway
+// strands it: every refresh fails at the provider (Google 400 / Outlook 401)
+// with nothing pointing at the real cause. So before any migration the
+// master asks the slave — over the internal channel — which providers it is
+// configured for. The answer carries presence booleans and the (public)
+// client IDs only, never a secret value.
+
+export interface SlaveOAuthStatus {
+	google: { configured: boolean; clientId?: string };
+	outlook: { configured: boolean; clientId?: string };
+}
+
+export function slaveOAuthStatusFromEnv(env: unknown): SlaveOAuthStatus {
+	const vars = (env ?? {}) as Record<string, unknown>;
+	const str = (name: string) =>
+		typeof vars[name] === "string" && vars[name] ? (vars[name] as string) : undefined;
+	const googleId = str("GOOGLE_CLIENT_ID");
+	const outlookId = str("OUTLOOK_CLIENT_ID");
+	return {
+		google: { configured: Boolean(googleId && str("GOOGLE_CLIENT_SECRET")), clientId: googleId },
+		outlook: {
+			configured: Boolean(outlookId && str("OUTLOOK_CLIENT_SECRET")),
+			clientId: outlookId,
+		},
+	};
+}
+
+export function handleSlaveOAuthStatus(env: unknown): Response {
+	return Response.json(slaveOAuthStatusFromEnv(env));
+}
+
+export async function getSlaveOAuthStatus(
+	config: ShardConfig,
+	fetchFn: typeof fetch = (input, init) => fetch(input, init),
+): Promise<SlaveOAuthStatus> {
+	if (!hasSlave(config)) throw new Error("No slave deployment is configured");
+	const origin = new URL(config.slaveUrl!).origin;
+	const response = await fetchFn(`${origin}/internal/oauth-status`, {
+		method: "GET",
+		headers: { "X-Internal-Key": config.slaveKey! },
+	});
+	if (!response.ok)
+		throw new Error(
+			`Migration to the slave server is paused: the slave's OAuth configuration could not be verified (its status endpoint answered ${response.status}). Redeploy the slave with the current version and retry; no accounts were moved.`,
+		);
+	return (await response.json()) as SlaveOAuthStatus;
+}
+
+type OAuthProvider = "google" | "outlook";
+
+function requiredOAuthProviders(accounts: unknown[]): Map<OAuthProvider, string[]> {
+	const required = new Map<OAuthProvider, string[]>();
+	for (const raw of accounts) {
+		const account = raw as {
+			email?: string;
+			auth?: { type?: string; provider?: string; clientId?: string };
+		};
+		if (account?.auth?.type !== "oauth2") continue;
+		// Accounts saved before Google sign-in existed carry no provider and
+		// default to Microsoft (see AccountAuth in src/mail/types.ts).
+		const provider: OAuthProvider = account.auth.provider === "google" ? "google" : "outlook";
+		const emails = required.get(provider) ?? [];
+		emails.push(account.email ?? "(unknown account)");
+		required.set(provider, emails);
+	}
+	return required;
+}
+
+// Throws before anything is moved when the slave cannot serve one of the
+// given accounts: the provider secret is absent on the slave, or the
+// slave's client ID does not match the one the account's tokens were
+// issued to. Password accounts need no provider configuration.
+export async function assertSlaveOAuthReady(
+	config: ShardConfig,
+	accounts: unknown[],
+	fetchFn: typeof fetch = (input, init) => fetch(input, init),
+): Promise<void> {
+	const required = requiredOAuthProviders(accounts);
+	if (required.size === 0) return;
+	const status = await getSlaveOAuthStatus(config, fetchFn);
+	const secretName: Record<OAuthProvider, string> = {
+		google: "GOOGLE_CLIENT_SECRET",
+		outlook: "OUTLOOK_CLIENT_SECRET",
+	};
+	const missing: string[] = [];
+	const mismatched: string[] = [];
+	for (const [provider, emails] of required) {
+		if (!status[provider]?.configured) {
+			missing.push(`${secretName[provider]} (needed by ${emails.join(", ")})`);
+			continue;
+		}
+		const slaveClientId = status[provider].clientId;
+		if (!slaveClientId) continue;
+		for (const raw of accounts) {
+			const account = raw as { auth?: { type?: string; provider?: string; clientId?: string } };
+			if (account?.auth?.type !== "oauth2") continue;
+			const accountProvider: OAuthProvider =
+				account.auth.provider === "google" ? "google" : "outlook";
+			if (accountProvider === provider && account.auth.clientId && account.auth.clientId !== slaveClientId)
+				mismatched.push(provider);
+		}
+	}
+	if (missing.length)
+		throw new Error(
+			`Migration to the slave server is paused: the slave is missing ${missing.join(" and ")}. Set the secret(s) on the slave Worker under exactly that name and retry; no accounts were moved.`,
+		);
+	if (mismatched.length)
+		throw new Error(
+			`Migration to the slave server is paused: the slave's OAuth client ID for ${[...new Set(mismatched)].join(", ")} does not match the client ID these accounts' tokens were issued to. Align the slave's client ID and secret with the master and retry; no accounts were moved.`,
+		);
+}
+
 export async function pushAccountsToSlave(
 	config: ShardConfig,
 	accounts: unknown[],
 	fetchFn: typeof fetch = (input, init) => fetch(input, init),
+	options?: { skipOAuthGate?: boolean },
 ): Promise<number> {
 	if (!hasSlave(config)) throw new Error("No slave deployment is configured");
+	// Migration gate: never strand an OAuth account on a slave that cannot
+	// refresh its tokens. Callers pushing an edit back to an account the
+	// slave already holds pass skipOAuthGate — that is not a migration.
+	if (!options?.skipOAuthGate) await assertSlaveOAuthReady(config, accounts, fetchFn);
 	const origin = new URL(config.slaveUrl!).origin;
 	const response = await fetchFn(`${origin}/internal/import-accounts`, {
 		method: "POST",

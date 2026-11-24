@@ -726,7 +726,9 @@ app.post("/slave-accounts/:id/update", async (c) => {
 			JSON.stringify(account.imap) === JSON.stringify(existing.imap) &&
 			JSON.stringify(account.smtp) === JSON.stringify(existing.smtp)
 		) {
-			await pushAccountsToSlave(config, [account]);
+			// Edit push-back to an account the slave already holds: not a
+			// migration, so the OAuth readiness gate does not apply.
+			await pushAccountsToSlave(config, [account], undefined, { skipOAuthGate: true });
 			return c.redirect("/?status=updated", 303);
 		}
 	} catch (error) {
@@ -749,7 +751,7 @@ app.post("/slave-accounts/:id/update", async (c) => {
 	try {
 		const { config } = await resolvedShard(c.env);
 		if (!hasSlave(config)) throw new Error("No slave server is linked");
-		await pushAccountsToSlave(config, [account]);
+		await pushAccountsToSlave(config, [account], undefined, { skipOAuthGate: true });
 		return c.redirect(
 			testResult.smtpConfigured
 				? "/?status=updated_tested"
@@ -1179,7 +1181,10 @@ async function persistAccountChange(env: MailEnv, pending: PendingAccountChange)
 	if (pending.target === "slave") {
 		const { config } = await resolvedShard(env);
 		if (!hasSlave(config)) throw new Error("No slave server is linked");
-		await pushAccountsToSlave(config, [{ id: pending.accountId!, ...pending.account }]);
+		// Update of an account the slave already holds: not a migration.
+		await pushAccountsToSlave(config, [{ id: pending.accountId!, ...pending.account }], undefined, {
+			skipOAuthGate: true,
+		});
 		return;
 	}
 	await store.update({ id: pending.accountId!, ...pending.account });

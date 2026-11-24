@@ -17,6 +17,7 @@ import {
 	exportAccountsFromSlave,
 	handleSlaveExport,
 	handleSlaveImport,
+	handleSlaveOAuthStatus,
 	hasSlave,
 	isSlave,
 	resolveShardConfig,
@@ -298,7 +299,7 @@ export class MyMCP extends McpAgent<MailEnv> {
 				"email_move_accounts_to_slave",
 				{
 					description:
-						"Move, migrate, or transfer configured accounts from this (master) server to the linked slave server by their account IDs from email_list_accounts. The complete account records, credentials included, are pushed master-to-slave over the internal channel and removed from this server only after the slave confirms storage; account IDs are preserved. Side effect: after a successful move the accounts are served by the slave and this server forwards their tool calls to it. Only available when a slave is linked. Do not use to remove accounts entirely; use email_remove_account for that.",
+						"Move, migrate, or transfer configured accounts from this (master) server to the linked slave server by their account IDs from email_list_accounts. The complete account records, credentials included, are pushed master-to-slave over the internal channel and removed from this server only after the slave confirms storage; account IDs are preserved. Side effect: after a successful move the accounts are served by the slave and this server forwards their tool calls to it. Only available when a slave is linked. Before moving, the slave must prove it holds the OAuth client secret for each account's provider (GOOGLE_CLIENT_SECRET for Gmail, OUTLOOK_CLIENT_SECRET for Microsoft); if a required secret is missing or its client ID mismatches, the move is refused and no accounts are moved — set the secret on the slave Worker and retry. Do not use to remove accounts entirely; use email_remove_account for that.",
 					inputSchema: {
 						accountIds: z
 							.array(z.string())
@@ -1651,6 +1652,12 @@ export default {
 				const store = new AccountStore(env.EMAIL_KV, env.CREDENTIAL_ENCRYPTION_KEY);
 				return handleSlaveExport(request, store);
 			}
+			if (
+				pathname === "/internal/oauth-status" &&
+				request.method === "GET" &&
+				slaveRequestAuthorized(request, shard)
+			)
+				return handleSlaveOAuthStatus(env);
 			if (
 				(pathname === "/mcp" || pathname.startsWith("/mcp/")) &&
 				slaveRequestAuthorized(request, shard)
