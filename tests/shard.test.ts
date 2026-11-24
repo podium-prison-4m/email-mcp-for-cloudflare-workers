@@ -193,6 +193,89 @@ test("slave export returns full records and rejects unknown IDs", async () => {
 	assert.equal(seenUrl, "https://slave.example/internal/export-accounts");
 });
 
+test("a slave account edit round-trips through export and import, preserving credentials", async () => {
+	const { pushAccountsToSlave, exportAccountsFromSlave, handleSlaveImport, handleSlaveExport } =
+		await import("../src/shard.ts");
+	const { AccountStore } = await import("../src/mail/account-store.ts");
+	type MailAccount = import("../src/mail/types.ts").MailAccount;
+
+	// The slave's own store, backed by an in-memory KV.
+	const key = Buffer.alloc(32, 7).toString("base64");
+	class FakeKv {
+		value: ArrayBuffer | undefined;
+		async get(): Promise<ArrayBuffer | null> {
+			return this.value ?? null;
+		}
+		async put(_key: string, value: ArrayBuffer): Promise<void> {
+			this.value = value;
+		}
+	}
+	const store = new AccountStore(new FakeKv() as unknown as KVNamespace, key);
+	const slaveStore = {
+		importAccounts: (accounts: never[]) => store.importAccounts(accounts as MailAccount[]),
+		get: (id: string) => store.get(id),
+	};
+	const original: MailAccount = {
+		id: "slave-acct-1",
+		name: "Original Name",
+		email: "person@example.com",
+		imap: { host: "imap.example.com", port: 993, secure: true },
+		smtp: { host: "smtp.example.com", port: 465, secure: true },
+		auth: { type: "password", password: "app-password-123" },
+	};
+	await store.importAccounts([original]);
+
+	// The internal channel between master and slave, routed in-process.
+	const seen: Array<{ url: string; key: string | null }> = [];
+	const fetchFn = async (url: string, init: any) => {
+		seen.push({ url, key: new Headers(init.headers).get("X-Internal-Key") });
+		const request = new Request(url, { method: "POST", body: init.body });
+		if (url.endsWith("/internal/export-accounts")) return handleSlaveExport(request, slaveStore);
+		if (url.endsWith("/internal/import-accounts")) return handleSlaveImport(request, slaveStore);
+		throw new Error(`Unexpected URL ${url}`);
+	};
+	const config = shardConfig({
+		SLAVE_MCP_URL: "https://slave.example/mcp",
+		SLAVE_INTERNAL_KEY: "shared-key",
+	});
+
+	// Mirror of the management page's slave update route: export the real
+	// record, apply the form edit on top of it, push the record back.
+	const exported = (await exportAccountsFromSlave(
+		config,
+		["slave-acct-1"],
+		fetchFn as typeof fetch,
+	)) as MailAccount[];
+	assert.equal(exported.length, 1);
+	const edited: MailAccount = {
+		...exported[0],
+		name: "Renamed Account",
+		aliases: ["alias@example.com"],
+		defaultFrom: "alias@example.com",
+	};
+	await pushAccountsToSlave(config, [edited], fetchFn as typeof fetch);
+
+	assert.deepEqual(
+		seen.map((entry) => entry.url),
+		["https://slave.example/internal/export-accounts", "https://slave.example/internal/import-accounts"],
+	);
+	for (const entry of seen) assert.equal(entry.key, "shared-key");
+
+	const accounts = await store.list();
+	assert.equal(accounts.length, 1);
+	assert.equal(accounts[0].id, "slave-acct-1");
+	assert.equal(accounts[0].name, "Renamed Account");
+	assert.equal(accounts[0].defaultFrom, "alias@example.com");
+	assert.deepEqual(accounts[0].aliases, ["alias@example.com"]);
+	// The credential and connection settings survive the round trip untouched.
+	assert.deepEqual(accounts[0].auth, { type: "password", password: "app-password-123" });
+	assert.deepEqual(accounts[0].imap, original.imap);
+	assert.deepEqual(accounts[0].smtp, original.smtp);
+
+	// Without a linked slave the push refuses before any request is made.
+	await assert.rejects(pushAccountsToSlave(shardConfig({}), [edited]), /No slave deployment/);
+});
+
 test("shard settings store round-trips encrypted settings and resolve prefers KV over env", async () => {
 	const { ShardSettingsStore, resolveShardConfig } = await import("../src/shard.ts");
 	const { sealJson } = await import("../src/crypto.ts");

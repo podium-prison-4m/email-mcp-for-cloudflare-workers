@@ -55,7 +55,11 @@ interface PendingAccountChange {
 	accountId?: string;
 	account: Omit<MailAccount, "id">;
 	createdAt: number;
-	/** Add mode only: store the new account on the linked slave instead of this server. */
+	/**
+	 * Where the change is stored: "slave" keeps the account on the linked
+	 * slave instead of this server (add: provision the new account there;
+	 * update: push the edited record back). Defaults to this server.
+	 */
 	target?: "local" | "slave";
 }
 
@@ -63,9 +67,16 @@ app.get("/", async (c) => {
 	try {
 		const accounts = await accountStore(c.env).list();
 		const editId = c.req.query("edit");
-		const editAccount = editId ? accounts.find((account) => account.id === editId) : undefined;
+		let editAccount = editId ? accounts.find((account) => account.id === editId) : undefined;
+		let editAccountOnSlave = false;
 		const hasAdminSession = (await adminSessionUser(c.req.raw, c.env)) !== undefined;
 		const view = await shardView(c.env);
+		if (editId && !editAccount) {
+			// The account may live on the slave: its summary prefills the same
+			// edit form, and the submit is forwarded to the slave.
+			editAccount = view.slaveAccounts.find((account) => account.id === editId);
+			editAccountOnSlave = Boolean(editAccount);
+		}
 		const connectionFlash = cookieValue(c.req.raw, "connection_test");
 		if (connectionFlash)
 			c.header("Set-Cookie", clearConnectionTestCookie(c.req.url.startsWith("https://")));
@@ -84,6 +95,7 @@ app.get("/", async (c) => {
 				undefined,
 				hasAdminSession,
 				view,
+				editAccountOnSlave,
 			),
 		);
 	} catch (error) {
@@ -558,6 +570,31 @@ async function shardRouteError(c: MailContext, error: unknown, status: 400 | 502
 	);
 }
 
+// Counterpart of the local update route's error render: reopen the editor on
+// the slave account so a rejected edit can be corrected in place.
+async function slaveAccountUpdateError(c: MailContext, error: unknown, id: string) {
+	const accounts = await accountStore(c.env)
+		.list()
+		.catch(() => []);
+	const view = await shardView(c.env).catch(() => undefined);
+	const editAccount = view?.slaveAccounts.find((account) => account.id === id);
+	return c.html(
+		managementPage(
+			accounts,
+			undefined,
+			errorMessage(error),
+			outlookConfigured(c.env),
+			googleConfigured(c.env),
+			editAccount,
+			undefined,
+			false,
+			view,
+			Boolean(editAccount),
+		),
+		400,
+	);
+}
+
 app.post("/settings/shard", async (c) => {
 	if (!isTrustedFormSubmission(c.req.raw)) return c.text("Forbidden", 403);
 
@@ -664,6 +701,63 @@ app.post("/slave-accounts/:id/remove", async (c) => {
 		return c.redirect("/?status=removed", 303);
 	} catch (error) {
 		return shardRouteError(c, error, 502);
+	}
+});
+
+// Edit a slave-held account, mirroring /accounts/:id/update: the slave's real
+// record (credentials included) is exported, the form input is applied on top
+// of it so its credentials are preserved, and the updated record is pushed
+// back, replacing the record with the same ID in the slave's store.
+app.post("/slave-accounts/:id/update", async (c) => {
+	if (!isTrustedFormSubmission(c.req.raw)) return c.text("Forbidden", 403);
+
+	const id = c.req.param("id");
+	let account: MailAccount;
+	try {
+		const { config } = await resolvedShard(c.env);
+		if (!hasSlave(config)) throw new Error("No slave server is linked");
+		const form = await c.req.formData();
+		const records = (await exportAccountsFromSlave(config, [id])) as MailAccount[];
+		const existing = records[0];
+		if (!existing) throw new Error(`Account ${id} not found on the slave server`);
+		account = { id: existing.id, ...accountInput(form, existing.auth) };
+		if (
+			account.email === existing.email &&
+			JSON.stringify(account.imap) === JSON.stringify(existing.imap) &&
+			JSON.stringify(account.smtp) === JSON.stringify(existing.smtp)
+		) {
+			await pushAccountsToSlave(config, [account]);
+			return c.redirect("/?status=updated", 303);
+		}
+	} catch (error) {
+		return slaveAccountUpdateError(c, error, id);
+	}
+
+	let testResult: { smtpConfigured: boolean };
+	try {
+		testResult = await testNewAccount(c.env, account);
+	} catch (error) {
+		return accountTestFailureResponse(c, error, {
+			mode: "update",
+			accountId: account.id,
+			account,
+			createdAt: Date.now(),
+			target: "slave",
+		});
+	}
+
+	try {
+		const { config } = await resolvedShard(c.env);
+		if (!hasSlave(config)) throw new Error("No slave server is linked");
+		await pushAccountsToSlave(config, [account]);
+		return c.redirect(
+			testResult.smtpConfigured
+				? "/?status=updated_tested"
+				: "/?status=updated_tested_imap_only",
+			303,
+		);
+	} catch (error) {
+		return pendingAccountError(c, error);
 	}
 });
 
@@ -983,8 +1077,9 @@ async function resolvedShard(
 // The slave's account summaries carry everything the management page renders
 // (identity, hosts, auth type, sender settings) but no credentials; adapt one
 // into the page's account shape with a placeholder credential that is never
-// displayed or used — slave accounts are managed through the slave, not by
-// editing their record here.
+// displayed or used. The summary also prefills the edit form: on submit the
+// slave's real record is exported and edited, so the placeholder never
+// reaches the slave's store.
 function displayAccountFromSummary(summary: Record<string, unknown>): MailAccount {
 	const authType = summary.authType === "oauth2" ? "oauth2" : "password";
 	return {
@@ -1081,6 +1176,12 @@ async function persistAccountChange(env: MailEnv, pending: PendingAccountChange)
 		await persistNewAccount(env, pending.account, pending.target ?? "local");
 		return;
 	}
+	if (pending.target === "slave") {
+		const { config } = await resolvedShard(env);
+		if (!hasSlave(config)) throw new Error("No slave server is linked");
+		await pushAccountsToSlave(config, [{ id: pending.accountId!, ...pending.account }]);
+		return;
+	}
 	await store.update({ id: pending.accountId!, ...pending.account });
 }
 
@@ -1163,6 +1264,7 @@ function managementPage(
 	},
 	hasAdminSession = false,
 	shard?: ShardView,
+	editAccountOnSlave = false,
 ): string {
 	const testSuccess =
 		status === "added_tested"
@@ -1265,6 +1367,7 @@ function managementPage(
 					<div class="account-header">
 						<div class="account-identity"><span class="account-avatar avatar-${providerKey(account)}" aria-hidden="true">${escapeHtml(account.name.charAt(0).toUpperCase())}</span><div><strong>${escapeHtml(account.name)}</strong><span>${escapeHtml(account.email)}</span><span class="badges"><span class="badge">${providerLabel(account)}</span><span class="badge${account.auth.type === "oauth2" ? " badge-oauth" : ""}">${account.auth.type === "oauth2" ? "OAuth 2.0" : "Password"}</span><span class="badge badge-oauth">Slave</span>${account.smtp ? "" : '<span class="badge">Receive only</span>'}</span></div></div>
 						<div class="account-actions">
+								<a class="secondary action-link" href="/?edit=${encodeURIComponent(account.id)}">Edit</a>
 								<form method="post" action="/accounts/${encodeURIComponent(account.id)}/move-from-slave">
 									<button class="secondary" type="submit">Move back</button>
 								</form>
@@ -1304,6 +1407,7 @@ function managementPage(
 		accountTestFailure?.change,
 		accountTestFailure?.pending,
 		shard?.configured ?? false,
+		editAccountOnSlave,
 	);
 	const testFailure = accountTestFailure
 		? `<dialog class="account-dialog test-failure-dialog" id="test-failure-dialog" aria-labelledby="test-failure-heading">
@@ -1536,6 +1640,7 @@ function accountEditor(
 	pendingChange?: PendingAccountChange,
 	pendingToken?: string,
 	shardConfigured = false,
+	editAccountOnSlave = false,
 ): { html: string; script: string } {
 	const editing = Boolean(account || pendingChange);
 	const existingAccount = pendingChange ? pendingChange.mode === "update" : Boolean(account);
@@ -1546,7 +1651,7 @@ function accountEditor(
 	const html = `<dialog class="account-dialog" id="account-editor" aria-labelledby="account-editor-heading">
 	<section class="dialog-card">
 		<div class="dialog-heading"><div><h2 id="account-editor-heading">${pendingChange ? "Edit account details" : editing ? "Edit account" : "Add an account"}</h2><p>${pendingChange ? "The credential from the failed test is preserved securely." : editing ? "Update the mailbox connection settings." : "Choose a provider and enter the account details."}</p></div><button class="icon-button" type="button" data-dialog-close aria-label="Close">×</button></div>
-		<form method="post" action="${pendingChange ? "/accounts/pending/edit-test" : editing ? `/accounts/${encodeURIComponent(account!.id)}/update` : "/accounts"}" autocomplete="off" id="account-form">
+		<form method="post" action="${pendingChange ? "/accounts/pending/edit-test" : editing ? (editAccountOnSlave ? `/slave-accounts/${encodeURIComponent(account!.id)}/update` : `/accounts/${encodeURIComponent(account!.id)}/update`) : "/accounts"}" autocomplete="off" id="account-form">
 			${pendingToken ? `<input type="hidden" name="pending" value="${escapeHtml(pendingToken)}">` : ""}
 			${
 				editing

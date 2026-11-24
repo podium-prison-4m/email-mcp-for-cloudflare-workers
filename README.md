@@ -323,8 +323,10 @@ namespace, typically on a separate Cloudflare account, while clients keep talkin
   account list merges both deployments (slave accounts carry a Slave badge), adding an
   account offers a storage target (this server or the slave — for the manual form and for
   Google/Microsoft OAuth sign-in), and each account can be moved between the deployments
-  from the list. Slave accounts support connection test and removal from the page; edit
-  them by moving them back first.
+  from the list. Slave accounts can be tested, removed, and edited from the page just
+  like local accounts: the edit form and fields are the same, and on save the master
+  applies the change to the slave's own record (credentials preserved; connection
+  changes are tested before saving, as for local accounts).
 
 ## Connect ChatGPT
 
